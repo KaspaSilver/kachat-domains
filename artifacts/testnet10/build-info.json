@@ -10,7 +10,7 @@
     "gapValue": 100000000,
     "tCommit": 600,
     "maxYears": 5,
-    "graceMs": 2592000000,
+    "graceMs": 864000000,
     "prices": {
       "len1": 400000000000,
       "len2": 200000000000,
@@ -34,14 +34,14 @@
   "registryCovenantId": null,
   "contracts": {
     "KachatName": {
-      "bytecodeLen": 2003,
+      "bytecodeLen": 2002,
       "stateSpan": {
         "offset": 1,
         "len": 117
       },
       "prefixLen": 1,
-      "suffixLen": 1885,
-      "templateHash": "4a86e3dee22b9b4701bdf299d9dde1b08b8d1f1f8c7f59ad79aa2a4edc1d2417",
+      "suffixLen": 1884,
+      "templateHash": "0ed5f862705aa8354b256d76ee9404acabbc067846056e214629931f3c0835b1",
       "dispatchTags": {
         "buy": "76a02eb9",
         "list": "674a8ea4",
@@ -50,7 +50,7 @@
         "renew": "b706ac38",
         "transfer": "794dca54"
       },
-      "bytecodeSha256": "26f27ec65a81436523eec40a872886821da2d7b4b3fef42055d0aaf80ac3d72d"
+      "bytecodeSha256": "eb15e44bc9005c6482fa930c29e357bbfc99d6d764bf004935af63c1936c8973"
     },
     "KachatGap": {
       "bytecodeLen": 3965,
@@ -60,13 +60,13 @@
       },
       "prefixLen": 1,
       "suffixLen": 3898,
-      "templateHash": "2c8cee1fae9e5e55a7fa81e92013c2d42a1f00d6234805790c1f887404a1cfbc",
+      "templateHash": "7af17b54afba127835ff94a453ce765e37255b7943c7d8858d342405033518da",
       "dispatchTags": {
         "absorbed": "dab76355",
         "merge": "63d25bc2",
         "register": "8667af5e"
       },
-      "bytecodeSha256": "4e0951a0f8be51e834928367050a07c40e0233aa74a83d6ebd90dde6ad5bef56"
+      "bytecodeSha256": "a0e4bf4fdd9dede2a0f9d70d01e84ffda708d228847fbc5c4201b5296f661e50"
     },
     "KachatOffer": "not built: set registryCovenantId after the genesis transaction"
   }

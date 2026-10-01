@@ -9,7 +9,7 @@
   "gapValue": 100000000,
   "tCommit": 600,
   "maxYears": 5,
-  "graceMs": 2592000000,
+  "graceMs": 864000000,
   "prices": {
     "len1": 400000000000,
     "len2": 200000000000,
