@@ -289,3 +289,31 @@ fn a_name_cannot_sit_at_seat_2() {
         input_fails(&kit, &e.spec, e.block, 2);
     }
 }
+
+#[test]
+fn merge_rejects_releasing_one_name_across_another_names_seam() {
+    // The gaps (lo, x) and (x, hi) around bob's key x are merged while the
+    // attacker releases their own name alice at seat 1. Without the
+    // "name at hi" check bob would stay alive inside a gap that covers his
+    // key, so "bob" could be registered a second time.
+    let kit = Kit::new();
+    let attacker = name_case(&kit, b"alice", 0); // owned and signed by keypair(1)
+    let x = name_key(b"bob");
+    let (lo, hi) = neighbours(&x);
+    let mut spec = TxSpec {
+        inputs: vec![
+            Input::contract(kit.gap_utxo(&lo, &x, 30), &kit.gap, gap_state(&lo, &x), "merge", vec![]),
+            Input::contract(attacker.utxo.clone(), &kit.name, attacker.fields.encode(), "release", vec![Arg::Sig(attacker.owner)]),
+            Input::contract(kit.gap_utxo(&x, &hi, 31), &kit.gap, gap_state(&x, &hi), "absorbed", vec![]),
+        ],
+        outputs: vec![kit.gap_output(&lo, &hi, 0)],
+        lock_time: 0,
+    };
+    let change = spec.total_in() - spec.total_out() - NET_FEE;
+    spec.outputs.push(TransactionOutput::new(change, p2pk_spk(&attacker.fields.owner)));
+    let built = kit.build(&spec);
+    let res = built.run_inputs();
+    assert!(res[1].is_ok() && res[2].is_ok(), "only merge can catch this: {res:?}");
+    assert!(res[0].is_err(), "merge must refuse: {res:?}");
+    assert!(kit.validate(&built, active_block()).is_err());
+}
