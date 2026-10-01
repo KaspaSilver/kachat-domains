@@ -279,3 +279,18 @@ fn a_refund_cannot_pay_a_listed_names_seller() {
     assert!(res[1].is_err(), "the refund must refuse: {res:?}");
     assert!(kit.validate(&built, Block { daa: OFFER_REFUND_AFTER as u64 + 1, time_ms: NOW_MS as u64 }).is_err());
 }
+
+#[test]
+fn two_refunds_cannot_burn_one_offer() {
+    // Two offers of the same buyer, one output that covers only one of them:
+    // the other offer's value would go to the miner. Refunds must be alone.
+    let kit = Kit::new();
+    let o = offer_case(&kit, b"alice", V);
+    let o2 = OfferCase { utxo: kit.offer_utxo(&o.fields, V, 44), ..offer_case(&kit, b"alice", V) };
+    let mut spec = refund(&kit, &o);
+    spec.inputs.push(offer_input(&kit, &o2, "refund", vec![]));
+    let built = kit.build(&spec);
+    let res = built.run_inputs();
+    assert!(res[0].is_err() && res[1].is_err(), "{res:?}");
+    assert!(kit.validate(&built, refund_block(&o)).is_err());
+}

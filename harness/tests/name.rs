@@ -429,3 +429,29 @@ fn renew_rejects_more_than_eight_inputs() {
     assert_eq!(spec.inputs.len(), 9);
     name_fails(&kit, &spec);
 }
+
+#[test]
+fn malformed_signatures_fail_closed() {
+    let kit = Kit::new();
+    let n = name_case(&kit, b"alice", 0);
+    let mut garbage = vec![0xffu8; 64];
+    garbage.push(0x01);
+    let mut zero = vec![0u8; 64];
+    zero.push(0x01);
+    for sig in [garbage, zero, vec![0x01; 64], vec![0x01; 66]] {
+        let mut spec = transfer(&kit, &n, &xonly(&keypair(7)));
+        // raw signature script: the ABI encoder itself refuses wrong lengths
+        let redeem = kit.name.redeem(&n.fields.encode());
+        let tag = { let h = kit.name.dispatch_tag("transfer"); let mut b = vec![0u8; 4]; faster_hex::hex_decode(h.as_bytes(), &mut b).unwrap(); b };
+        let raw = [push(&xonly(&keypair(7))), push(&sig), push(&tag), push(&redeem)].concat();
+        if sig.len() == 65 {
+            // the raw layout is exactly what the ABI encoder produces
+            let abi = kit.name.sig_script(&redeem, "transfer", &[ArtifactValue::Bytes(xonly(&keypair(7)).to_vec()), ArtifactValue::Bytes(sig.clone())]);
+            assert_eq!(raw, abi);
+        }
+        spec.inputs[0].unlock = Unlock::Raw(raw);
+        let built = kit.build(&spec);
+        assert!(built.run_inputs()[0].is_err(), "sig {sig:?}");
+        assert!(kit.validate(&built, active_block()).is_err());
+    }
+}
