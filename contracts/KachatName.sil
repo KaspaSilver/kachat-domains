@@ -1,0 +1,192 @@
+pragma silverscript ^0.1.0;
+
+// .kachat name UTXO (KACHAT_NAMES.md section 3).
+//
+// One UTXO per registered name. Every name and every gap carries the one
+// registry covenant id. This template never references the gap or the offer
+// template (no template-hash cycles); it references only itself, through
+// validateOutputState.
+//
+// Runtime state (spliced into the redeem script, 117 bytes):
+//   key        byte[32]  blake3(name bytes)
+//   name       byte[32]  the name, zero padded to 32 bytes
+//   owner      byte[32]  x-only schnorr key (a KaChat P2PK address)
+//   price      int       0 = not listed, otherwise the asking price in sompi
+//   expiresAt  int       unix milliseconds (timestamp lock-time domain)
+//
+// Baked parameters: bond (exact value of every name UTXO), maxYears,
+// graceMs, renew1 .. renew5 (renewal price per year for names of 1, 2, 3, 4,
+// 5+ bytes, in sompi, paid as miner fee).
+//
+// Names are yearly. Script can only say "not before", so transfer, list, buy
+// and renew keep working after expiresAt; the indexer and the app stop
+// resolving a name at expiresAt. From expiresAt + graceMs anyone may run the
+// exit (reclaim) and the bond goes back to the last owner.
+//
+// Every owner signature must use SIGHASH_ALL (0x01), so it commits to every
+// output of the transaction (the continuation, the payout, the change).
+contract KachatName(
+    byte[32] initKey,
+    byte[32] initName,
+    byte[32] initOwner,
+    int initPrice,
+    int initExpiresAt,
+    int bond,
+    int maxYears,
+    int graceMs,
+    int renew1,
+    int renew2,
+    int renew3,
+    int renew4,
+    int renew5
+) {
+    // Highest asking price accepted by list(): the total KAS supply in sompi.
+    int constant MAX_PRICE = 2900000000000000000;
+    int constant YEAR_MS = 31536000000;
+    // renew refuses to extend past this (keeps every expiry sum inside a
+    // script integer); about 3 million years.
+    int constant MAX_EXPIRES_AT = 100000000000000000;
+    // Miner-fee sums: bounded loops, capped values (see KachatGap).
+    int constant MAX_INPUTS = 8;
+    int constant MAX_OUTPUTS = 8;
+    int constant MAX_IO_VALUE = 1000000000000000000;
+
+    byte[32] key = initKey;
+    byte[32] name = initName;
+    byte[32] owner = initOwner;
+    int price = initPrice;
+    int expiresAt = initExpiresAt;
+
+    // checkSig against an x-only key, restricted to SIGHASH_ALL.
+    function ownerSigned(sig s, byte[32] signer): bool {
+        byte[65] raw = byte[65](s);
+        return raw[64] == 0x01 && checkSig(s, pubkey(signer));
+    }
+
+    // A name moves alone: it is the only registry input and authorizes
+    // exactly one registry output, which carries exactly `bond`. Being the
+    // only registry input also means no other registry spend can share this
+    // transaction's miner fee. Returns the continuation output index.
+    function soloContinuation(): int {
+        byte[32] covId = OpInputCovenantId(this.activeInputIndex);
+        require(OpCovInputCount(covId) == 1, "one registry input");
+        require(OpCovOutputCount(covId) == 1, "one registry output");
+        require(OpAuthOutputCount(this.activeInputIndex) == 1, "one continuation");
+        int out = OpAuthOutputIdx(this.activeInputIndex, 0);
+        require(tx.outputs[out].value == bond, "continuation keeps the bond");
+        return out;
+    }
+
+    // The 3-input exit: seat 1 of [gap.merge @0, name @1, gap.absorbed @2],
+    // one registry output (the merged gap) at output 0.
+    function exitSeat() {
+        require(this.activeInputIndex == 1, "seat 1");
+        byte[32] covId = OpInputCovenantId(this.activeInputIndex);
+        require(OpCovInputCount(covId) == 3, "three registry inputs");
+        require(OpCovInputIdx(covId, 0) == 0, "registry input 0");
+        require(OpCovInputIdx(covId, 1) == 1, "registry input 1");
+        require(OpCovInputIdx(covId, 2) == 2, "registry input 2");
+        require(OpCovOutputCount(covId) == 1, "one registry output");
+        require(OpCovOutputIdx(covId, 0) == 0, "registry output 0");
+        require(OpAuthOutputCount(this.activeInputIndex) == 0, "name authorizes nothing");
+    }
+
+    // sum(input values) - sum(output values): what the miner receives.
+    function minerFee(): int {
+        require(tx.inputs.length <= MAX_INPUTS, "at most 8 inputs");
+        require(tx.outputs.length <= MAX_OUTPUTS, "at most 8 outputs");
+        int sumIn = 0;
+        for (i, 0, tx.inputs.length, MAX_INPUTS) {
+            int v = tx.inputs[i].value;
+            require(v <= MAX_IO_VALUE, "input value cap");
+            sumIn = sumIn + v;
+        }
+        int sumOut = 0;
+        for (j, 0, tx.outputs.length, MAX_OUTPUTS) {
+            int w = tx.outputs[j].value;
+            require(w <= MAX_IO_VALUE, "output value cap");
+            sumOut = sumOut + w;
+        }
+        return sumIn - sumOut;
+    }
+
+    // Renewal price per year by name length (the padded name is a run of
+    // non-zero bytes followed by zeros).
+    function renewPrice(): int {
+        int p = renew5;
+        if (name[1] == 0x00) {
+            p = renew1;
+        } else if (name[2] == 0x00) {
+            p = renew2;
+        } else if (name[3] == 0x00) {
+            p = renew3;
+        } else if (name[4] == 0x00) {
+            p = renew4;
+        }
+        return p;
+    }
+
+    // Hand the name to newOwner. Any listing is cleared.
+    entry transfer(byte[32] newOwner, sig ownerSig) {
+        require(ownerSigned(ownerSig, owner), "owner signature");
+        require(newOwner != byte[32](0x0000000000000000000000000000000000000000000000000000000000000000), "owner key");
+        int out = soloContinuation();
+        validateOutputState(out, State { key: key, name: name, owner: newOwner, price: 0, expiresAt: expiresAt });
+    }
+
+    // Set the asking price in sompi (0 delists).
+    entry list(int newPrice, sig ownerSig) {
+        require(ownerSigned(ownerSig, owner), "owner signature");
+        require(newPrice >= 0, "price >= 0");
+        require(newPrice <= MAX_PRICE, "price <= supply");
+        int out = soloContinuation();
+        validateOutputState(out, State { key: key, name: name, owner: owner, price: newPrice, expiresAt: expiresAt });
+    }
+
+    // Anyone may buy a listed name. The seller is paid by the output right
+    // after the name's continuation, so a payment can never be counted for a
+    // second purchase. The buyer's own SIGHASH_ALL funding signature commits
+    // to the continuation, and therefore to newOwner.
+    entry buy(byte[32] newOwner) {
+        require(price > 0, "listed");
+        require(newOwner != byte[32](0x0000000000000000000000000000000000000000000000000000000000000000), "owner key");
+        int out = soloContinuation();
+        int payout = out + 1;
+        require(payout < tx.outputs.length, "payout exists");
+        byte[36] sellerLock = new ScriptPubKeyP2PK(pubkey(owner));
+        require(tx.outputs[payout].scriptPubKey == byte[](sellerLock), "payout to the seller");
+        require(tx.outputs[payout].value >= price, "payout covers the price");
+        validateOutputState(out, State { key: key, name: name, owner: newOwner, price: 0, expiresAt: expiresAt });
+    }
+
+    // Anyone may extend a name (gifting allowed): years * the renewal price
+    // is left to the miner.
+    entry renew(int years) {
+        require(years >= 1, "years >= 1");
+        require(years <= maxYears, "years <= maxYears");
+        require(expiresAt <= MAX_EXPIRES_AT, "expiry cap");
+        int out = soloContinuation();
+        require(minerFee() >= renewPrice() * years, "renewal paid as miner fee");
+        validateOutputState(out, State { key: key, name: name, owner: owner, price: price, expiresAt: expiresAt + years * YEAR_MS });
+    }
+
+    // Owner exit, any time: the name is destroyed and its bond is free for
+    // the owner's signed outputs.
+    entry release(sig ownerSig) {
+        require(ownerSigned(ownerSig, owner), "owner signature");
+        exitSeat();
+    }
+
+    // Permissionless exit once tx.time >= expiresAt + graceMs. Output 1 pays
+    // the bond back to the last owner; the rest of the freed value is the
+    // caller's.
+    entry reclaim() {
+        exitSeat();
+        require(expiresAt <= MAX_EXPIRES_AT + 1000000000000, "expiry range");
+        require(tx.time >= temporal(expiresAt + graceMs));
+        require(tx.outputs.length >= 2, "bond output");
+        byte[36] ownerLock = new ScriptPubKeyP2PK(pubkey(owner));
+        require(tx.outputs[1].scriptPubKey == byte[](ownerLock), "bond to the last owner");
+        require(tx.outputs[1].value >= bond, "bond returned");
+    }
+}

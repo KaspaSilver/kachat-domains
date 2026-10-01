@@ -1,0 +1,95 @@
+pragma silverscript ^0.1.0;
+
+// .kachat offer (KACHAT_NAMES.md section 4).
+//
+// KAS a buyer locks for one name, which may or may not be listed. Plain P2SH:
+// no covenant id. The app creates an offer by splicing the runtime state into
+// this template (it never runs the compiler), so the per-offer data is state:
+//   key          byte[32]  blake3(name) of the wanted name
+//   buyer        byte[32]  x-only key that receives the name / the refund
+//   refundAfter  int       DAA score from which anyone may refund
+//
+// Baked once per network (after the registry genesis):
+//   registryCovId     the .kachat registry covenant id (never zero)
+//   nameTemplateHash  KachatName template hash
+//   namePrefixLen, nameSuffixLen  KachatName template layout
+//   maxFee            the most network fee an accept or a refund may take
+//                     out of the offer's own value
+//
+// The offer references the registry and the name template; the name and the
+// gap never reference offers, so there is no template-hash cycle.
+contract KachatOffer(
+    byte[32] initKey,
+    byte[32] initBuyer,
+    int initRefundAfter,
+    byte[32] registryCovId,
+    byte[32] nameTemplateHash,
+    int namePrefixLen,
+    int nameSuffixLen,
+    int maxFee
+) {
+    // Layout of the KachatName runtime state (must match KachatName.sil).
+    struct NameState {
+        byte[32] key;
+        byte[32] name;
+        byte[32] owner;
+        int price;
+        int expiresAt;
+    }
+
+    byte[32] key = initKey;
+    byte[32] buyer = initBuyer;
+    int refundAfter = initRefundAfter;
+
+    // The name at input nameIdx (the offer sits right after it, so one name
+    // input can settle at most one offer) continues to the buyer, unlisted,
+    // with its expiry unchanged (accept works whether or not it expired),
+    // and the output right after the name's continuation pays the current
+    // owner at least the offer's value minus maxFee. The owner consents with
+    // the name's own transfer signature (SIGHASH_ALL) in the same tx, or the
+    // name is listed and runs buy() with newOwner = buyer.
+    entry accept(int nameIdx) {
+        require(nameIdx >= 0, "name index");
+        require(nameIdx < tx.inputs.length, "name index");
+        require(this.activeInputIndex == nameIdx + 1, "offer right after its name");
+        require(OpInputCovenantId(nameIdx) == registryCovId, "registry name");
+        NameState cur = readInputStateWithTemplate(nameIdx, namePrefixLen, nameSuffixLen, nameTemplateHash);
+        require(cur.key == key, "the wanted name");
+
+        require(OpAuthOutputCount(nameIdx) == 1, "one name continuation");
+        int nameOut = OpAuthOutputIdx(nameIdx, 0);
+        validateOutputStateWithInputTemplate(
+            nameOut,
+            NameState { key: key, name: cur.name, owner: buyer, price: 0, expiresAt: cur.expiresAt },
+            nameIdx,
+            namePrefixLen,
+            nameSuffixLen,
+            nameTemplateHash
+        );
+
+        int payout = nameOut + 1;
+        require(payout < tx.outputs.length, "payout exists");
+        byte[36] sellerLock = new ScriptPubKeyP2PK(pubkey(cur.owner));
+        require(tx.outputs[payout].scriptPubKey == byte[](sellerLock), "payout to the owner");
+        require(tx.outputs[payout].value >= tx.inputs[this.activeInputIndex].value - maxFee, "payout covers the offer");
+    }
+
+    // The buyer takes the KAS back at any time (SIGHASH_ALL only).
+    entry withdraw(sig buyerSig) {
+        byte[65] raw = byte[65](buyerSig);
+        require(raw[64] == 0x01, "SIGHASH_ALL");
+        require(checkSig(buyerSig, pubkey(buyer)), "buyer signature");
+    }
+
+    // From refundAfter on, anyone may send the KAS back to the buyer. The
+    // refund is a lone 1-in/1-out transaction, so its payment can never be
+    // counted for any other spend in the same transaction.
+    entry refund() {
+        require(tx.daa >= refundAfter);
+        require(tx.inputs.length == 1, "refund alone");
+        require(tx.outputs.length == 1, "one refund output");
+        byte[36] buyerLock = new ScriptPubKeyP2PK(pubkey(buyer));
+        require(tx.outputs[0].scriptPubKey == byte[](buyerLock), "refund to the buyer");
+        require(tx.outputs[0].value >= tx.inputs[0].value - maxFee, "refund covers the offer");
+    }
+}

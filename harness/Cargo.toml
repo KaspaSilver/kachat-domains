@@ -1,0 +1,28 @@
+[package]
+name = "kachat-names-harness"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94.0"
+license = "ISC"
+publish = false
+description = "Engine-backed tests for the .kachat name covenants"
+
+[lib]
+path = "src/lib.rs"
+
+# Same rusty-kaspa revision silverscript v1.0.0 pins (Cargo.toml of 3ed9733),
+# and the compiler itself at the v1.0.0 commit.
+[dependencies]
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-consensus = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-hashes = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-txscript-errors = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+silverscript-abi = { git = "https://github.com/kaspanet/silverscript", rev = "3ed973335b59269293564805cc2c58a14595ec03" }
+silverscript-lang = { git = "https://github.com/kaspanet/silverscript", rev = "3ed973335b59269293564805cc2c58a14595ec03" }
+blake2b_simd = "1.0.2"
+blake3 = "1.8.5"
+rand = "0.8.5"
+secp256k1 = { version = "0.29.0", features = ["global-context", "rand-std"] }
+serde_json = "1.0"
+faster-hex = "0.10"

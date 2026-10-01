@@ -1,0 +1,73 @@
+{
+  "network": "mainnet",
+  "compiler": {
+    "repo": "https://github.com/kaspanet/silverscript",
+    "tag": "v1.0.0",
+    "commit": "3ed973335b59269293564805cc2c58a14595ec03"
+  },
+  "params": {
+    "bond": 100000000,
+    "gapValue": 100000000,
+    "tCommit": 600,
+    "maxYears": 5,
+    "graceMs": 2592000000,
+    "prices": {
+      "len1": 400000000000,
+      "len2": 200000000000,
+      "len3": 100000000000,
+      "len4": 25000000000,
+      "len5plus": 3500000000
+    },
+    "renewPrices": {
+      "len1": 400000000000,
+      "len2": 200000000000,
+      "len3": 100000000000,
+      "len4": 25000000000,
+      "len5plus": 3500000000
+    },
+    "offerMaxFee": 2000000,
+    "genesisGap": {
+      "lo": "0000000000000000000000000000000000000000000000000000000000000000",
+      "hi": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  },
+  "registryCovenantId": null,
+  "contracts": {
+    "KachatName": {
+      "bytecodeLen": 2003,
+      "stateSpan": {
+        "offset": 1,
+        "len": 117
+      },
+      "prefixLen": 1,
+      "suffixLen": 1885,
+      "templateHash": "4a86e3dee22b9b4701bdf299d9dde1b08b8d1f1f8c7f59ad79aa2a4edc1d2417",
+      "dispatchTags": {
+        "buy": "76a02eb9",
+        "list": "674a8ea4",
+        "reclaim": "f56af4df",
+        "release": "388ad0b4",
+        "renew": "b706ac38",
+        "transfer": "794dca54"
+      },
+      "bytecodeSha256": "26f27ec65a81436523eec40a872886821da2d7b4b3fef42055d0aaf80ac3d72d"
+    },
+    "KachatGap": {
+      "bytecodeLen": 3965,
+      "stateSpan": {
+        "offset": 1,
+        "len": 66
+      },
+      "prefixLen": 1,
+      "suffixLen": 3898,
+      "templateHash": "2c8cee1fae9e5e55a7fa81e92013c2d42a1f00d6234805790c1f887404a1cfbc",
+      "dispatchTags": {
+        "absorbed": "dab76355",
+        "merge": "63d25bc2",
+        "register": "8667af5e"
+      },
+      "bytecodeSha256": "4e0951a0f8be51e834928367050a07c40e0233aa74a83d6ebd90dde6ad5bef56"
+    },
+    "KachatOffer": "not built: set registryCovenantId after the genesis transaction"
+  }
+}
