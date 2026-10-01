@@ -77,7 +77,7 @@ All are version-1 transactions with output covenant bindings and per-input compu
 | `bond` | 1 KAS | name, gap |
 | `gapValue` | 1 KAS | gap |
 | `tCommit` | 600 DAA | gap |
-| `maxYears` | 5 (build refuses > 31) | gap, name |
+| `maxYears` | 2 (build refuses > 31) | gap, name |
 | `graceMs` | 864,000,000 (10 days) | name |
 | `prices` (per year, by length 1/2/3/4/5+) | 4000 / 2000 / 1000 / 250 / 35 KAS | gap |
 | `renewPrices` (separate params) | 4000 / 2000 / 1000 / 250 / 35 KAS | name |
@@ -93,8 +93,8 @@ once `registryCovenantId` is filled in after the genesis transaction).
 
 | Template | Size | Prefix / state / suffix | Template hash |
 |---|---|---|---|
-| KachatGap | 3965 | 1 / 66 / 3898 | `7af17b54afba127835ff94a453ce765e37255b7943c7d8858d342405033518da` |
-| KachatName | 2002 | 1 / 117 / 1884 | `0ed5f862705aa8354b256d76ee9404acabbc067846056e214629931f3c0835b1` |
+| KachatGap | 3965 | 1 / 66 / 3898 | `a182d59bbf460baff5ec99ca850b990d45fbafee4dfbe9a3a7a1afe21e7ba8ca` |
+| KachatName | 2002 | 1 / 117 / 1884 | `42eddf19e7ea2bc78b9aa97937f21be0505ebcf964653508f74e179dd6c7e39d` |
 | KachatOffer | 897 | 1 / 75 / 821 | depends on the registry id |
 | commit redeem | 68 | fixed | - |
 
@@ -113,20 +113,20 @@ the engine; P2PK funding inputs need 10.
 | Operation | Size B | Compute g | Transient g (norm.) | Storage g | Min network fee | Compute budget (script units) |
 |---|---|---|---|---|---|---|
 | register 5 chars, 1 y | 6712 | 10782 | 13424 | 124323 | 0.0134 KAS | gap.register 6 (65106), commit 10 |
-| register 32 chars, 5 y | 6739 | 10909 | 13478 | 127511 | 0.0135 KAS | gap.register 7 (73880), commit 10 |
-| register worst case (32 chars, 5 y, 8 in, 8 out) | 7547 | 18157 | 15094 | 160174 | 0.0182 KAS | gap.register 7 (74124) |
+| register 32 chars, 2 y | 6739 | 10909 | 13478 | 126247 | 0.0135 KAS | gap.register 7 (73880), commit 10 |
+| register worst case (32 chars, 2 y, 8 in, 8 out) | 7547 | 18157 | 15094 | 154342 | 0.0182 KAS | gap.register 7 (74124) |
 | transfer | 2516 | 5346 | 5032 | 5101 | 0.0054 KAS | name.transfer 11 (113393) |
 | list | 2488 | 5318 | 4976 | 5101 | 0.0053 KAS | name.list 11 (113355) |
 | buy | 2502 | 4692 | 5004 | 39104 | 0.0050 KAS | name.buy 1 (13207) |
 | renew 1 y | 2418 | 4248 | 4836 | 42658 | 0.0048 KAS | name.renew 1 (13298) |
-| renew worst case (5 y, 8 in, 8 out) | 3450 | 13440 | 6900 | 100624 | 0.0134 KAS | name.renew 1 (13622) |
+| renew worst case (2 y, 8 in, 8 out) | 3450 | 13440 | 6900 | 94774 | 0.0134 KAS | name.renew 1 (13622) |
 | release (exit) | 10417 | 12447 | 20834 | 0 | 0.0208 KAS | merge 3 (38758), release 10 (104695), absorbed 0 (8214) |
 | reclaim (exit) | 10403 | 11793 | 20806 | 0 | 0.0208 KAS | merge 3 (38746), reclaim 0 (4522), absorbed 0 (8214) |
 | offer accept | 3356 | 5486 | 6712 | 39736 | 0.0067 KAS | transfer 11, offer.accept 3 (36403) |
 | offer withdraw | 1171 | 2531 | 2342 | 0 | 0.0025 KAS | offer.withdraw 10 (102135) |
 | offer refund | 1105 | 1465 | 2210 | 0 | 0.0022 KAS | offer.refund 0 (2053) |
 
-Register and renew additionally leave `price × years` as miner fee (35 KAS … 20,000 KAS). Each
+Register and renew additionally leave `price × years` as miner fee (35 KAS … 8,000 KAS). Each
 signature check costs 100,000 script units (10 budget units), which dominates every signed entry.
 Recommended fixed budgets for the app: register 7, merge 3, absorbed 0, transfer/list 11, buy 1,
 renew 1, release 10, reclaim 0, accept 3, withdraw 10, refund 0, commit/P2PK 10.
@@ -154,8 +154,8 @@ input's script fails (and not merely on its budget) and that the whole transacti
 
 | File | Tests | Covers |
 |---|---|---|
-| `register.rs` | 34 | every price tier at exactly the price and one sompi short; digits/hyphens; 1..5 years; years 0/−1/6; expiry not matching years; no commit; commit for another owner / name / salt; front-runner swapping the owner; immature commit (consensus sequence lock), short relative lock, disabled lock bit, high sequence bits; `now` in the future / not past the block median time / DAA-domain lock time / finalized gap input / absurd `now`; key outside the gap, on either boundary, and a 96-case differential test of the byte order; bad characters, leading/trailing hyphen, length 0 and 33; extra registry output; moved outputs; wrong values; wrong name state; forged name template; zero owner; gap not at input 0; two registry inputs; 9 inputs / 9 outputs (8 pass) |
-| `name.rs` | 32 | transfer (keeps expiry, clears listing, works after expiry); wrong sig; non-ALL sighash types; malformed signatures; zero owner; changed key/name/expiry; bond pinned; name vanishing / splitting / leaving the registry; batching; list/delist; bad prices; buy (overpay ok); unlisted; too little; wrong script ×4; wrong payout index; two buys sharing one payment; tampered continuation; renew 1 and 5 years; exact tier price per year and one short; years 0/−1/6; renew from a lapsed expiry; renew changing anything else; tier from the stored name; expiry cap; two renewals sharing one fee; 9 inputs |
+| `register.rs` | 34 | every price tier at exactly the price and one sompi short; digits/hyphens; 1..2 years; years 0/−1/3; expiry not matching years; no commit; commit for another owner / name / salt; front-runner swapping the owner; immature commit (consensus sequence lock), short relative lock, disabled lock bit, high sequence bits; `now` in the future / not past the block median time / DAA-domain lock time / finalized gap input / absurd `now`; key outside the gap, on either boundary, and a 96-case differential test of the byte order; bad characters, leading/trailing hyphen, length 0 and 33; extra registry output; moved outputs; wrong values; wrong name state; forged name template; zero owner; gap not at input 0; two registry inputs; 9 inputs / 9 outputs (8 pass) |
+| `name.rs` | 32 | transfer (keeps expiry, clears listing, works after expiry); wrong sig; non-ALL sighash types; malformed signatures; zero owner; changed key/name/expiry; bond pinned; name vanishing / splitting / leaving the registry; batching; list/delist; bad prices; buy (overpay ok); unlisted; too little; wrong script ×4; wrong payout index; two buys sharing one payment; tampered continuation; renew 1 and 2 years; exact tier price per year and one short; years 0/−1/3; renew from a lapsed expiry; renew changing anything else; tier from the stored name; expiry cap; two renewals sharing one fee; 9 inputs |
 | `exit.rs` | 23 | release; release while listed/expired; wrong sig / sighash; non-adjacent predecessor / successor; forged seat-2 gap (no id / another id); forged seat-1 name; gap at seat 1; releasing one name across another name's seam; wrong merged gap / value; extra registry output; reordered seats; fourth registry input; a name at seat 2 under every entry; reclaim pays the bond; grace is 10 days; before grace (script: `expiresAt+grace−1`, at expiry; consensus: median time not past); DAA-domain lock; finalized input; bond to the caller / short / wrong index / missing; overpaying ok; renewed name not reclaimable at the old time |
 | `offer.rs` | 19 | accept; accept on an expired name keeps the expiry; maxFee boundary; paying less / to a stranger / to the buyer / at another index; different name; name not going to the buyer; name outside the registry; two offers on one name; offer away from its name; bad indices; listed name + offer matched by a third party; withdraw; withdraw by owner/stranger/non-ALL; refund after refundAfter; before (script and consensus) / finalized input; refund to a stranger / short / with a skim output; two refunds sharing or burning; refund used as a buy payout |
 | `genesis.rs` | 10 | genesis validity; nobody can mint the registry id later; non-registry input cannot rebind; artifacts == fresh compile; testnet == mainnet templates; state does not move the template; hand codecs == ABI codecs (and decode); state spans; commit script spend; dispatch tags |
@@ -195,12 +195,12 @@ pair - removing both is caught - and the offer's key check).
    list and buy require exactly one registry input, so two fee-paying operations can never share
    one fee. A miner including its own registrations/renewals gets the price back (accepted).
 4. **Bounded loops**: register and renew transactions are limited to 8 inputs and 8 outputs and
-   values ≤ 1e18 sompi; the wallet must consolidate funding first (4000 KAS × 5 years = 20,000 KAS).
+   values ≤ 1e18 sompi; the wallet must consolidate funding first (4000 KAS × 2 years = 8,000 KAS).
 5. **Key validity**: script cannot check that an owner key is on the curve. `ownerKey`/`newOwner`
    of zero are refused; any other invalid key bricks owner entries until the name lapses, after
    which `reclaim` frees the key (bond goes to the unspendable key). The app must validate keys.
 6. **Storage mass**: each 1-KAS covenant output costs ~40k grams of KIP-9 storage mass, so a
-   registration is ~125k-160k grams (a quarter of a block's 500k storage budget). Not charged in
+   registration is ~125k-155k grams (a quarter of a block's 500k storage budget). Not charged in
    the relay fee today, but block-space heavy; a larger `gapValue`/`bond` reduces it
    proportionally.
 7. **Listing + offer matching**: anyone may pair `buy(newOwner = buyer)` with the buyer's offer.
@@ -211,7 +211,7 @@ pair - removing both is caught - and the offer's key check).
    accept old offers for that name. Offers are refundable by anyone after `refundAfter`.
 9. **Time**: `now` and the reclaim/expiry use the block's past median time (lags wall clock
    ~2.2 min). Registering with `now = wall clock − 3 min` loses those minutes of the paid year.
-10. **Mempool policy not exercised**: relay of 35-20,000 KAS fees, the post-Toccata standard-mass
+10. **Mempool policy not exercised**: relay of 35-8,000 KAS fees, the post-Toccata standard-mass
     relaxation window, and mempool handling of the time-locked transactions must be confirmed on
     TN10 (phase 2). The harness checks consensus validity, the P2SH sig-op scan and output
     standardness only.

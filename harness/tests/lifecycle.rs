@@ -126,22 +126,22 @@ fn full_lifecycle_returns_the_registry_to_its_genesis_gap() {
     alice = alice.with_owner(&bx);
     alice_utxo = out(&t, 0, blk.daa);
 
-    // a gifter renews alice for 3 years
-    let due = kit.params.renew_price_for(5) * 3;
+    // a gifter renews alice for 2 years
+    let due = kit.params.renew_price_for(5) * 2;
     let f = kit.p2pk_utxo(&gifter, due + kas(2), 72);
     let mut spec = TxSpec {
         inputs: vec![
-            Input::contract(alice_utxo.clone(), &kit.name, alice.encode(), "renew", vec![int(3)]),
+            Input::contract(alice_utxo.clone(), &kit.name, alice.encode(), "renew", vec![int(2)]),
             Input::new(f, Unlock::P2pk(gifter)),
         ],
-        outputs: vec![kit.name_output(&alice.with_expiry(alice.expires_at + 3 * YEAR_MS), 0)],
+        outputs: vec![kit.name_output(&alice.with_expiry(alice.expires_at + 2 * YEAR_MS), 0)],
         lock_time: 0,
     };
     spec.outputs.push(TransactionOutput::new(spec.total_in() - spec.total_out() - due - NET_FEE, p2pk_spk(&xonly(&gifter))));
     let t = ok(&kit, &spec, blk);
-    alice = alice.with_expiry(alice.expires_at + 3 * YEAR_MS);
+    alice = alice.with_expiry(alice.expires_at + 2 * YEAR_MS);
     alice_utxo = out(&t, 0, blk.daa);
-    assert_eq!(alice.expires_at, NOW_MS + 5 * YEAR_MS);
+    assert_eq!(alice.expires_at, NOW_MS + 4 * YEAR_MS);
 
     // carol offers 40 KAS for bob; bob's owner accepts
     let offer = OfferFields { key: kb, buyer: xonly(&carol), refund_after: OFFER_REFUND_AFTER };

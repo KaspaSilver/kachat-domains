@@ -8,7 +8,7 @@
   "bond": 100000000,
   "gapValue": 100000000,
   "tCommit": 600,
-  "maxYears": 5,
+  "maxYears": 2,
   "graceMs": 864000000,
   "prices": {
     "len1": 400000000000,

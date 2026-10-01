@@ -322,7 +322,7 @@ fn renew_pays_exactly_the_tier_price_per_year() {
     for name in [&b"a"[..], b"ab", b"abc", b"abcd", b"alice", b"kaspa-silver-0123456789-abcdefgh"] {
         let mut n = name_case(&kit, name, 0);
         n.utxo = kit.name_utxo(&n.fields, 20);
-        for years in [1, 3] {
+        for years in [1, kit.params.max_years] {
             let mut spec = renew(&kit, &n, years);
             let due = kit.params.renew_price_for(name.len()) * years as u64;
             // exactly the price: passes
