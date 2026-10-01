@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Mutation check: delete (or weaken) one security check at a time, rebuild the
 # artifacts, run the engine-backed suite, and report which tests catch it.
-# A mutation nobody catches is either redundant (defense in depth, listed as
-# such below) or a hole in the tests. Restores contracts/ and artifacts/ after
+# A mutation nobody catches is either redundant (defense in depth, labelled
+# "redundant" below, with what covers it) or a hole in the tests. Restores contracts/ and artifacts/ after
 # each mutation. Usage: scripts/mutation-check.sh
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -39,15 +39,17 @@ mutate $G 'require(lessThan(newKey, hi), "key < hi");' '' "gap: key < hi"
 mutate $G 'require(charset[unsigned(n[i])] == 0x01, "name charset");' '' "gap: charset"
 mutate $G 'require(n[0] != 0x2d, "no leading hyphen");' '' "gap: leading hyphen"
 mutate $G 'require(n[n.length - 1] != 0x2d, "no trailing hyphen");' '' "gap: trailing hyphen"
-mutate $G 'require(OpCovOutputCount(covId) == 3, "three registry outputs");' '' "gap: register output count"
+mutate $G 'require(OpCovOutputCount(covId) == 3, "three registry outputs");' '' "gap: register output count (redundant with AuthOutputCount(0) == 3 + one registry input)"
 mutate $G 'require(tx.outputs[2].value == bond, "name bond");' '' "gap: name bond value"
-mutate $G 'require(tx.inputs.length <= MAX_INPUTS, "at most 8 inputs");' '' "gap: input bound"
+mutate $G 'require(tx.inputs.length <= MAX_INPUTS, "at most 8 inputs");' '' "gap: input bound (redundant with the compiler loop guard, which TUTORIAL.md says not to rely on)"
 mutate $G 'require(seated.key == hi, "name at hi");' '' "gap: merge name adjacency"
 mutate $G 'require(succ.lo == hi, "successor starts at hi");' '' "gap: merge successor adjacency"
 mutate $G 'require(tx.outputs[0].value == gapValue, "merged gap value");' '' "gap: merged gap value"
 mutate $N 'return raw[64] == 0x01 && checkSig' 'return checkSig' "name: SIGHASH_ALL only"
-mutate $N 'require(OpCovInputCount(covId) == 1, "one registry input");' '' "name: one registry input (defense in depth)"
-mutate $N 'require(OpCovOutputCount(covId) == 1, "one registry output");' '' "name: one registry output"
+mutate $N 'require(OpCovInputCount(covId) == 1, "one registry input");' '' "name: one registry input (redundant with one registry output; the pair is tested below)"
+mutate $N 'require(OpCovOutputCount(covId) == 1, "one registry output");' '' "name: one registry output (redundant with one registry input + one continuation)"
+mutate $N 'require(OpCovInputCount(covId) == 1, "one registry input");
+        require(OpCovOutputCount(covId) == 1, "one registry output");' '' "name: one registry input AND one registry output (both removed)"
 mutate $N 'require(tx.outputs[out].value == bond, "continuation keeps the bond");' '' "name: continuation value"
 mutate $N 'require(tx.outputs[payout].value >= price, "payout covers the price");' '' "name: buy payout value"
 mutate $N 'require(tx.outputs[payout].scriptPubKey == byte[](sellerLock), "payout to the seller");' '' "name: buy payout script"
@@ -59,7 +61,7 @@ mutate $N 'require(tx.outputs[1].value >= bond, "bond returned");' '' "name: rec
 mutate $N 'require(this.activeInputIndex == 1, "seat 1");' '' "name: exit seat"
 mutate $O 'require(this.activeInputIndex == nameIdx + 1, "offer right after its name");' '' "offer: adjacency"
 mutate $O 'require(OpInputCovenantId(nameIdx) == registryCovId, "registry name");' '' "offer: registry id"
-mutate $O 'require(cur.key == key, "the wanted name");' '' "offer: wanted key"
+mutate $O 'require(cur.key == key, "the wanted name");' '' "offer: wanted key (redundant: the continuation is validated with key = the offer key)"
 mutate $O 'require(tx.outputs[payout].value >= tx.inputs[this.activeInputIndex].value - maxFee, "payout covers the offer");' '' "offer: accept payout value"
 mutate $O 'require(tx.daa >= refundAfter);' '' "offer: refund after"
 mutate $O 'require(tx.inputs.length == 1, "refund alone");' '' "offer: refund alone"
