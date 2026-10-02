@@ -66,14 +66,20 @@ impl Templates {
     }
 
     /// The kit for `registry_id`: the offer is compiled for that id with the
-    /// pinned compiler library; if `artifacts/testnet10/KachatOffer.json`
-    /// exists (scripts/build.sh after genesis) it must be byte-identical.
+    /// pinned compiler library; when `registry_id` is the deployed registry
+    /// (params `registryCovenantId`) and `artifacts/testnet10/KachatOffer.json`
+    /// exists (scripts/build.sh after genesis), the two must be byte-identical.
+    /// Other ids (tests, dry runs on a synthetic genesis) skip the comparison.
     pub fn kit(&self, registry_id: Hash) -> Result<Kit> {
         let name = self.name();
         let gap = self.gap();
         let offer = compile_offer_in(&self.root, &self.params, &name, registry_id);
         let built_offer = self.root.join("artifacts").join(PARAMS_FILE).join("KachatOffer.json");
-        if built_offer.exists() {
+        let deployed_id = std::fs::read_to_string(self.root.join("params").join(format!("{PARAMS_FILE}.json")))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v["registryCovenantId"].as_str().map(str::to_owned));
+        if built_offer.exists() && deployed_id.as_deref() == Some(registry_id.to_string().as_str()) {
             let art = Template::load_in(&self.root, PARAMS_FILE, "KachatOffer");
             ensure!(
                 art.bytecode == offer.bytecode,
