@@ -200,7 +200,7 @@ fn select(wallet: &[Utxo], used: &[TransactionOutpoint], target: u64, slots: usi
     out
 }
 
-fn finish(env: &Env, wallet: &[Utxo], mut d: Draft, fee: Fee) -> Result<Plan> {
+fn finish(env: &Env, wallet: &[Utxo], mut d: Draft, payload: Vec<u8>, fee: Fee) -> Result<Plan> {
     let me = env.deployer;
     let spec_of = |inputs: &[(Input, String)], outputs: &[(TransactionOutput, String)]| TxSpec {
         inputs: inputs.iter().map(|(i, _)| i.clone()).collect(),
@@ -248,7 +248,7 @@ fn finish(env: &Env, wallet: &[Utxo], mut d: Draft, fee: Fee) -> Result<Plan> {
                     outputs.push((TransactionOutput::new(change, env.my_spk()), "change (deployer)".to_string()));
                 }
                 let spec = spec_of(&inputs, &outputs);
-                let built = env.kit.build(&spec);
+                let built = env.kit.build_with_payload(&spec, &payload);
                 let fee_now = network_fee(env, &env.kit.costs(&built));
                 if fee_now <= est {
                     if !with_change && change > 0 {
@@ -271,7 +271,7 @@ fn finish(env: &Env, wallet: &[Utxo], mut d: Draft, fee: Fee) -> Result<Plan> {
             let others: u64 = d.outputs.iter().enumerate().filter(|(j, _)| *j != idx).map(|(_, (o, _))| o.value).sum();
             d.outputs[idx].0.value = total_in.saturating_sub(others + d.price_fee).max(1);
             let spec = spec_of(&d.inputs, &d.outputs);
-            let built = env.kit.build(&spec);
+            let built = env.kit.build_with_payload(&spec, &payload);
             let fee = network_fee(env, &env.kit.costs(&built));
             if let Some(cap) = cap {
                 ensure!(fee <= cap, "{}: network fee {} exceeds the contract's maxFee {}", d.op, fmt_kas(fee), fmt_kas(cap));
@@ -285,7 +285,7 @@ fn finish(env: &Env, wallet: &[Utxo], mut d: Draft, fee: Fee) -> Result<Plan> {
         }
     };
     ensure!(spec.inputs.len() <= 255 && spec.outputs.len() <= 255, "too many inputs/outputs");
-    let built = env.kit.build(&spec);
+    let built = env.kit.build_with_payload(&spec, &payload);
     let costs = env.kit.costs(&built);
     let validation = env.kit.validate(&built, env.block);
     if let Ok(fee) = &validation {
@@ -309,6 +309,21 @@ fn finish(env: &Env, wallet: &[Utxo], mut d: Draft, fee: Fee) -> Result<Plan> {
         new_offer: None,
         registry_id: None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// payload markers (KACHAT_NAMES_INDEXER.md B4): informational for name
+// transactions, the discovery hint for offers. Commits carry none (the name
+// must stay hidden until it is registered). The contracts never read them.
+// ---------------------------------------------------------------------------
+
+pub fn name_payload(op: &str, name: &str) -> Vec<u8> {
+    format!("kchat:1:name:{op}:{name}").into_bytes()
+}
+
+/// `kchat:1:offer:<keyHex>:<buyerXonlyHex>:<refundAfterDaa>`
+pub fn offer_payload(f: &OfferFields) -> Vec<u8> {
+    format!("kchat:1:offer:{}:{}:{}", hex(&f.key), hex(&f.buyer), f.refund_after).into_bytes()
 }
 
 // ---------------------------------------------------------------------------
@@ -391,7 +406,7 @@ pub fn genesis(t: &Templates, deployer: Keypair, wallet: &[Utxo], block: Block, 
         price_fee: 0,
         notes: vec![format!("registry covenant id = covenant_id({}, [(0, gap)]) = {registry_id}", crate::util::fmt_outpoint(&funding.outpoint))],
     };
-    let mut plan = finish(&env, &[], d, Fee::FromOutput { idx: 1, cap: None })?;
+    let mut plan = finish(&env, &[], d, vec![], Fee::FromOutput { idx: 1, cap: None })?;
     plan.registry_id = Some(registry_id);
     ensure!(plan.built.tx.outputs.iter().filter(|o| o.covenant.is_some()).count() == 1, "genesis authorizes exactly one output");
     Ok((plan, env.kit))
@@ -419,7 +434,7 @@ pub fn commit(env: &Env, wallet: &[Utxo], name: &str, salt: [u8; 32]) -> Result<
             hex(&c)
         )],
     };
-    let mut plan = finish(env, wallet, d, Fee::Funded { max_inputs: MAX_INPUTS })?;
+    let mut plan = finish(env, wallet, d, vec![], Fee::Funded { max_inputs: MAX_INPUTS })?;
     plan.new_commit = Some(CommitRec {
         name: name.to_string(),
         owner: me,
@@ -516,7 +531,7 @@ pub fn register(
         price_fee: price,
         notes,
     };
-    finish(env, wallet, d, Fee::Funded { max_inputs: MAX_IO_FEE_ENTRY })
+    finish(env, wallet, d, name_payload("register", name), Fee::Funded { max_inputs: MAX_IO_FEE_ENTRY })
 }
 
 // ---------------------------------------------------------------------------
@@ -541,7 +556,7 @@ pub fn renew(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo, years: i64) -
             format!("expiresAt {} -> {} (from the old expiry)", fmt_ms(n.fields.expires_at), fmt_ms(nf.expires_at)),
         ],
     };
-    finish(env, wallet, d, Fee::Funded { max_inputs: MAX_IO_FEE_ENTRY })
+    finish(env, wallet, d, name_payload("renew", &name), Fee::Funded { max_inputs: MAX_IO_FEE_ENTRY })
 }
 
 pub fn transfer(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo, new_owner: &[u8; 32]) -> Result<Plan> {
@@ -566,7 +581,7 @@ pub fn transfer(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo, new_owner:
         price_fee: 0,
         notes,
     };
-    finish(env, wallet, d, Fee::Funded { max_inputs: MAX_INPUTS })
+    finish(env, wallet, d, name_payload("transfer", &name), Fee::Funded { max_inputs: MAX_INPUTS })
 }
 
 pub fn list(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo, price: u64) -> Result<Plan> {
@@ -589,7 +604,7 @@ pub fn list(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo, price: u64) ->
         price_fee: 0,
         notes,
     };
-    finish(env, wallet, d, Fee::Funded { max_inputs: MAX_INPUTS })
+    finish(env, wallet, d, name_payload("list", &name), Fee::Funded { max_inputs: MAX_INPUTS })
 }
 
 /// The deployer buys a listed name: [name.buy(me), funding] ->
@@ -618,7 +633,7 @@ pub fn buy(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo) -> Result<Plan>
         price_fee: 0,
         notes,
     };
-    finish(env, wallet, d, Fee::Funded { max_inputs: MAX_INPUTS })
+    finish(env, wallet, d, name_payload("buy", &name), Fee::Funded { max_inputs: MAX_INPUTS })
 }
 
 // ---------------------------------------------------------------------------
@@ -658,7 +673,7 @@ pub fn offer(env: &Env, wallet: &[Utxo], name: &str, amount: u64, refund_after: 
         price_fee: 0,
         notes,
     };
-    let mut plan = finish(env, wallet, d, Fee::Funded { max_inputs: MAX_INPUTS })?;
+    let mut plan = finish(env, wallet, d, offer_payload(&fields), Fee::Funded { max_inputs: MAX_INPUTS })?;
     plan.new_offer = Some(OfferRec {
         outpoint: TransactionOutpoint::new(plan.txid(), 0),
         fields,
@@ -697,7 +712,7 @@ pub fn accept_offer(env: &Env, n: &NameRec, name_utxo: &Utxo, o: &OfferRec, offe
         price_fee: 0,
         notes: vec![format!("the network fee comes out of the offer (contract maxFee {})", fmt_kas(env.kit.params.offer_max_fee))],
     };
-    finish(env, &[], d, Fee::FromOutput { idx: 1, cap: Some(env.kit.params.offer_max_fee) })
+    finish(env, &[], d, name_payload("accept", &name), Fee::FromOutput { idx: 1, cap: Some(env.kit.params.offer_max_fee) })
 }
 
 pub fn withdraw_offer(env: &Env, o: &OfferRec, utxo: &Utxo) -> Result<Plan> {
@@ -711,7 +726,7 @@ pub fn withdraw_offer(env: &Env, o: &OfferRec, utxo: &Utxo) -> Result<Plan> {
         price_fee: 0,
         notes: vec![],
     };
-    finish(env, &[], d, Fee::FromOutput { idx: 0, cap: None })
+    finish(env, &[], d, vec![], Fee::FromOutput { idx: 0, cap: None })
 }
 
 /// Anyone refunds once DAA >= refundAfter: 1 input, 1 output, lock time =
@@ -735,7 +750,7 @@ pub fn refund_offer(env: &Env, o: &OfferRec, utxo: &Utxo) -> Result<Plan> {
         price_fee: 0,
         notes,
     };
-    finish(env, &[], d, Fee::FromOutput { idx: 0, cap: Some(env.kit.params.offer_max_fee) })
+    finish(env, &[], d, vec![], Fee::FromOutput { idx: 0, cap: Some(env.kit.params.offer_max_fee) })
 }
 
 // ---------------------------------------------------------------------------
@@ -781,7 +796,7 @@ pub fn release(env: &Env, x: ExitParts) -> Result<Plan> {
         price_fee: 0,
         notes: vec![],
     };
-    finish(env, &[], d, Fee::FromOutput { idx: 1, cap: None })
+    finish(env, &[], d, name_payload("release", &name), Fee::FromOutput { idx: 1, cap: None })
 }
 
 /// Anyone reclaims a lapsed name: [merge, reclaim(), absorbed] -> [merged
@@ -818,5 +833,5 @@ pub fn reclaim(env: &Env, x: ExitParts) -> Result<Plan> {
         price_fee: 0,
         notes,
     };
-    finish(env, &[], d, Fee::FromOutput { idx: 2, cap: None })
+    finish(env, &[], d, name_payload("reclaim", &name), Fee::FromOutput { idx: 2, cap: None })
 }

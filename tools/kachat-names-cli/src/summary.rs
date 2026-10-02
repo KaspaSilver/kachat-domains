@@ -24,7 +24,13 @@ pub fn render(plan: &Plan, submit: bool) -> String {
     } else {
         format!("{} (unix ms, {})", tx.lock_time, fmt_ms(tx.lock_time as i64))
     };
-    let _ = writeln!(s, "version    {}   lock time {lock}   payload {} B", tx.version, tx.payload.len());
+    let _ = writeln!(s, "version    {}   lock time {lock}", tx.version);
+    let _ = writeln!(
+        s,
+        "payload    {} B{}",
+        tx.payload.len(),
+        if tx.payload.is_empty() { String::new() } else { format!("  {:?}", String::from_utf8_lossy(&tx.payload)) }
+    );
     let _ = writeln!(s, "inputs ({}):", tx.inputs.len());
     for (i, input) in tx.inputs.iter().enumerate() {
         let e = &plan.built.entries[i];

@@ -88,6 +88,7 @@ pub struct TxView {
     pub id: TransactionId,
     pub inputs: Vec<(TransactionOutpoint, Vec<u8>)>,
     pub outputs: Vec<TransactionOutput>,
+    pub payload: Vec<u8>,
 }
 
 impl From<&Transaction> for TxView {
@@ -96,8 +97,28 @@ impl From<&Transaction> for TxView {
             id: tx.id(),
             inputs: tx.inputs.iter().map(|i| (i.previous_outpoint, i.signature_script.clone())).collect(),
             outputs: tx.outputs.clone(),
+            payload: tx.payload.clone(),
         }
     }
+}
+
+/// An offer announced by the `kchat:1:offer:<keyHex>:<buyerXonlyHex>:<refundAfterDaa>`
+/// payload marker, if one of the outputs really is that offer
+/// (P2SH(offer prefix || state || suffix)). Returns (output index, fields).
+pub fn offer_from_marker(kit: &Kit, tx: &TxView) -> Option<(usize, OfferFields)> {
+    let text = std::str::from_utf8(&tx.payload).ok()?;
+    let rest = text.strip_prefix("kchat:1:offer:")?;
+    let mut parts = rest.split(':');
+    let key = unhex32(parts.next()?).ok()?;
+    let buyer = unhex32(parts.next()?).ok()?;
+    let refund_after: i64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || refund_after < 0 {
+        return None;
+    }
+    let fields = OfferFields { key, buyer, refund_after };
+    let spk = kit.offer.spk(&fields.encode());
+    let idx = tx.outputs.iter().position(|o| o.script_public_key == spk && o.covenant.is_none())?;
+    Some((idx, fields))
 }
 
 /// One decoded P2SH spend: `<args> <tag> <redeem>`.
@@ -228,7 +249,8 @@ impl Registry {
             .enumerate()
             .filter_map(|(i, (op, _))| self.offers.iter().find(|o| o.outpoint == *op).map(|o| (i, o.clone())))
             .collect();
-        if reg_outs.is_empty() && gap_ins.is_empty() && name_ins.is_empty() && offer_ins.is_empty() {
+        let new_offer = offer_from_marker(kit, tx);
+        if reg_outs.is_empty() && gap_ins.is_empty() && name_ins.is_empty() && offer_ins.is_empty() && new_offer.is_none() {
             return Ok(vec![]);
         }
         let id = tx.id;
@@ -355,6 +377,19 @@ impl Registry {
                 Predicted::Gap { lo, hi } => self.gaps.push(GapRec { outpoint: op, lo, hi, value }),
                 Predicted::Name(fields) => self.names.push(NameRec { outpoint: op, fields, value }),
             }
+        }
+        if let Some((idx, fields)) = new_offer {
+            let op = TransactionOutpoint::new(id, idx as u32);
+            let known = self.names.iter().find(|n| n.fields.key == fields.key).map(|n| n.name());
+            events.push(format!(
+                "offer {} on {} by {} (refundAfter DAA {})",
+                crate::util::fmt_kas(tx.outputs[idx].value),
+                known.clone().unwrap_or_else(|| hex(&fields.key[..8])),
+                p2pk_address(&fields.buyer),
+                fields.refund_after
+            ));
+            self.offers.retain(|o| o.outpoint != op);
+            self.offers.push(OfferRec { outpoint: op, fields, value: tx.outputs[idx].value, name: known });
         }
         self.applied.push(id);
         if self.applied.len() > APPLIED_KEEP {

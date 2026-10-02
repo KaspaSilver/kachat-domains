@@ -46,7 +46,7 @@ pub fn view_of(tx: &RpcOptionalTransaction) -> Result<TxView> {
         let cov: Option<CovenantBinding> = o.covenant.as_ref().and_then(|c| c.0).map(Into::into);
         outputs.push(TransactionOutput::with_covenant(o.value.ok_or_else(|| anyhow!("{id}: output without value"))?, spk, cov));
     }
-    Ok(TxView { id, inputs, outputs })
+    Ok(TxView { id, inputs, outputs, payload: tx.payload.clone().unwrap_or_default() })
 }
 
 pub async fn scan(node: &Node, kit: &Kit, reg: &mut Registry, min_confirmations: u64, max_rounds: usize, verbose: bool) -> Result<ScanReport> {

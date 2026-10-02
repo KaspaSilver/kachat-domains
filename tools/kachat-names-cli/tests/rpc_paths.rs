@@ -2,7 +2,8 @@
 //! simulated e2e plan: what SubmitTransaction carries must decode on the
 //! node side to the identical transaction (id, storage-mass commitment,
 //! compute budgets), and the scanner (GetVirtualChainFromBlockV2's
-//! RpcOptionalTransaction) must rebuild exactly the state the CLI tracks.
+//! RpcOptionalTransaction) must rebuild exactly the state the CLI tracks,
+//! offers included (found through their `kchat:1:offer:` payload marker).
 
 use kachat_names_cli::{
     ops::Templates,
@@ -53,11 +54,9 @@ fn the_scanner_view_rebuilds_the_tracked_state() {
             block_time: None,
         });
         let v = view_of(&o).unwrap();
+        assert_eq!(v.payload, p.built.tx.payload);
         scanned.apply(kit, &v).unwrap();
-        // offers are tracked by the CLI that creates them (no covenant id on chain)
-        if let Some(of) = &p.new_offer {
-            scanned.track_offer(of.clone());
-        }
+        // no track_offer here: the scanner finds offers by their payload marker
     }
     let tracked = s.reg.as_ref().unwrap();
     assert_eq!(scanned.gaps, tracked.gaps);

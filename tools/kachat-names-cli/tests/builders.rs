@@ -104,6 +104,7 @@ fn register_matches_the_harness_scenario_shape() {
     assert_eq!((tx.inputs[0].sequence, tx.inputs[1].sequence, tx.inputs[2].sequence), (0, 600, 0));
     assert_eq!(tx.version, 1);
     assert_eq!(p.price_fee, 35 * SOMPI);
+    assert_eq!(tx.payload, b"kchat:1:name:register:alice");
     // change back to the owner at output 3
     assert_eq!(tx.outputs.len(), 4);
     assert_eq!(tx.outputs[3].script_public_key, p2pk_spk(&me));
@@ -167,10 +168,13 @@ fn name_entries_pass_the_validator() {
     let p = ops::renew(&env, &w, &n, &u, 2).unwrap();
     assert_valid(&p);
     assert_eq!(p.price_fee, 70 * SOMPI);
+    assert_eq!(p.built.tx.payload, b"kchat:1:name:renew:alice");
     let p = ops::transfer(&env, &w, &n, &u, &xonly(&keypair(9))).unwrap();
     assert_valid(&p);
+    assert_eq!(p.built.tx.payload, b"kchat:1:name:transfer:alice");
     let p = ops::list(&env, &w, &n, &u, 50 * SOMPI).unwrap();
     assert_valid(&p);
+    assert_eq!(p.built.tx.payload, b"kchat:1:name:list:alice");
     // buying needs a listed name; the payout is output 1, right after the continuation
     assert!(ops::buy(&env, &w, &n, &u).is_err());
     let (listed, lu) = name_rec(&env, "alice", &xonly(&keypair(5)), 50 * SOMPI as i64, 31);
@@ -178,6 +182,7 @@ fn name_entries_pass_the_validator() {
     assert_valid(&p);
     assert_eq!(p.built.tx.outputs[1].script_public_key, p2pk_spk(&xonly(&keypair(5))));
     assert_eq!(p.built.tx.outputs[1].value, 50 * SOMPI);
+    assert_eq!(p.built.tx.payload, b"kchat:1:name:buy:alice");
 }
 
 #[test]
@@ -203,15 +208,26 @@ fn offers_pass_the_validator() {
     assert_valid(&p);
     let o: OfferRec = p.new_offer.clone().unwrap();
     assert_eq!(o.outpoint, TransactionOutpoint::new(p.txid(), 0));
+    // the payload marker the indexer (and `scan`) find offers by
+    let marker = format!("kchat:1:offer:{}:{}:{refund_after}", faster_hex::hex_string(&o.fields.key), faster_hex::hex_string(&me));
+    assert_eq!(p.built.tx.payload, marker.as_bytes());
+    let found = kachat_names_cli::registry::offer_from_marker(&env.kit, &TxView::from(&p.built.tx)).unwrap();
+    assert_eq!(found, (0, o.fields.clone()));
+    // a marker that matches no output is ignored
+    let mut lying = TxView::from(&p.built.tx);
+    lying.payload = format!("kchat:1:offer:{}:{}:{}", faster_hex::hex_string(&o.fields.key), faster_hex::hex_string(&me), refund_after + 1).into_bytes();
+    assert!(kachat_names_cli::registry::offer_from_marker(&env.kit, &lying).is_none());
     let ou = Utxo::new(o.outpoint, UtxoEntry::new(o.value, env.kit.offer.spk(&o.fields.encode()), active_block().daa, false, None));
 
     let p = ops::accept_offer(&env, &n, &nu, &o, &ou).unwrap();
     assert_valid(&p);
+    assert_eq!(p.built.tx.payload, b"kchat:1:name:accept:alice");
     assert!(p.network_fee <= env.kit.params.offer_max_fee);
     assert_eq!(p.built.tx.inputs.len(), 2);
 
     let p = ops::withdraw_offer(&env, &o, &ou).unwrap();
     assert_valid(&p);
+    assert!(p.built.tx.payload.is_empty());
 
     // refund: invalid before refundAfter, valid after; DAA lock time
     let p = ops::refund_offer(&env, &o, &ou).unwrap();
@@ -238,6 +254,7 @@ fn exits_pass_the_validator() {
 
     let p = ops::release(&env, x()).unwrap();
     assert_valid(&p);
+    assert_eq!(p.built.tx.payload, b"kchat:1:name:release:alice");
     assert_eq!(p.built.tx.outputs.len(), 2);
 
     // reclaim: not before expiresAt + grace (median time), then valid
@@ -248,6 +265,7 @@ fn exits_pass_the_validator() {
     let p = ops::reclaim(&late, x()).unwrap();
     assert_valid(&p);
     assert_eq!(p.built.tx.lock_time, unlock);
+    assert_eq!(p.built.tx.payload, b"kchat:1:name:reclaim:alice");
     assert_eq!(p.built.tx.outputs[1].script_public_key, p2pk_spk(&me));
     assert_eq!(p.built.tx.outputs[1].value, env.kit.params.bond);
 }
@@ -260,6 +278,8 @@ fn commit_builds_the_fixed_redeem() {
     let redeem = commit_redeem(&commitment(b"alice", &env.me(), &[3; 32]), &env.me());
     assert_eq!(p.built.tx.outputs[0].script_public_key, pay_to_script_hash_script(&redeem));
     assert_eq!(p.built.tx.outputs[0].value, ops::COMMIT_VALUE);
+    // a commit carries no payload: the name stays hidden until registration
+    assert!(p.built.tx.payload.is_empty());
     assert!(ops::commit(&env, &wallet(&env, 5, 1), "-bad", [3; 32]).is_err());
     assert!(ops::commit(&env, &wallet(&env, 5, 1), "Alice", [3; 32]).is_err());
 }
@@ -388,4 +408,82 @@ fn only_kaspatest_schnorr_addresses_are_accepted() {
 fn consensus_params_are_testnet10() {
     assert_eq!(kachat_names_cli::net::consensus_params().net.to_string(), "testnet-10");
     let _ = OfferFields { key: ZERO32, buyer: ZERO32, refund_after: 0 };
+}
+
+// ---------------------------------------------------------------------------
+// the signature-script encoding the indexer decodes (KACHAT_NAMES_INDEXER.md B3)
+// ---------------------------------------------------------------------------
+
+/// (opcode, pushed bytes) of every push.
+fn raw_pushes(script: &[u8]) -> Vec<(u8, Vec<u8>)> {
+    let mut out = vec![];
+    let mut i = 0;
+    while i < script.len() {
+        let op = script[i];
+        i += 1;
+        let n = match op {
+            0x01..=0x4b => op as usize,
+            0x4c => {
+                i += 1;
+                script[i - 1] as usize
+            }
+            0x4d => {
+                i += 2;
+                u16::from_le_bytes([script[i - 2], script[i - 1]]) as usize
+            }
+            _ => 0,
+        };
+        out.push((op, script[i..i + n].to_vec()));
+        i += n;
+    }
+    out
+}
+
+#[test]
+fn signature_scripts_are_args_then_tag_then_redeem() {
+    let mut sim = Sim::new(templates(), PLANNED_FUNDING, NOW_MS + 10 * YEAR_MS);
+    for (step, _) in plan::e2e_steps() {
+        sim.run(&step).unwrap();
+    }
+    let kit = sim.kit.as_ref().unwrap();
+    let find = |op: &str| sim.plans.iter().find(|p| p.op.starts_with(op)).unwrap();
+
+    // register alpha-tn (1 y): name, ownerKey, salt, now, years, namePrefix, nameSuffix, tag, redeem
+    let p = find("register alpha-tn");
+    let s = raw_pushes(&p.built.tx.inputs[0].signature_script);
+    assert_eq!(s.len(), 9);
+    assert_eq!(s[0], (0x08, b"alpha-tn".to_vec()));
+    assert_eq!((s[1].0, s[2].0), (0x20, 0x20)); // byte[32]: 32-byte pushes
+    assert_eq!(s[3].0, 0x06); // now ~1.8e12 ms: a 6-byte minimal script number
+    assert_eq!(s[4], (0x51, vec![])); // years = 1: OP_1, not a data push
+    assert_eq!(s[5], (0x01, kit.name.prefix.clone())); // byte[] prefix (1 byte, 0x6b)
+    assert_eq!((s[6].0, s[6].1.len()), (0x4d, 1884)); // byte[] suffix: OP_PUSHDATA2
+    let mut tag = [0u8; 4];
+    faster_hex::hex_decode(kit.gap.dispatch_tag("register").as_bytes(), &mut tag).unwrap();
+    assert_eq!(s[7], (0x04, tag.to_vec())); // the 4-byte dispatch tag push
+    assert_eq!((s[8].0, s[8].1.len()), (0x4d, 3965)); // the gap redeem, OP_PUSHDATA2
+
+    // list alpha-tn 50: price (5e9 sompi: 5-byte script number), sig (65 bytes, ends 0x01), tag, redeem
+    let p = find("list alpha-tn");
+    let s = raw_pushes(&p.built.tx.inputs[0].signature_script);
+    assert_eq!(s.len(), 4);
+    assert_eq!(s[0].0, 0x05);
+    assert_eq!((s[1].0, s[1].1.len(), *s[1].1.last().unwrap()), (0x41, 65, 0x01));
+    assert_eq!(s[2].0, 0x04);
+    assert_eq!((s[3].0, s[3].1.len()), (0x4d, 2002));
+
+    // accept-offer: offer.accept(0): nameIdx 0 is OP_0 (an empty push)
+    let p = find("accept offer");
+    let s = raw_pushes(&p.built.tx.inputs[1].signature_script);
+    assert_eq!(s[0], (0x00, vec![]));
+    assert_eq!(s[1].0, 0x04);
+    assert_eq!((s[2].0, s[2].1.len()), (0x4d, 897)); // offer redeem
+
+    // reclaim(): no args, just tag + redeem; merge/absorbed likewise
+    let p = find("reclaim lapse-tn");
+    for i in 0..3 {
+        let s = raw_pushes(&p.built.tx.inputs[i].signature_script);
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0].0, 0x04);
+    }
 }
