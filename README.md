@@ -381,6 +381,12 @@ transaction: id, storage-mass commitment, compute budgets) and through the scann
 RpcOptionalTransaction view, which rebuilds exactly the state the CLI tracked, offers included
 (found by their payload marker alone).
 `tests/keys.rs` covers the keygen guards.
+`src/bin/kachat-names-vectors.rs` writes test vectors for ports of these builders (the KaChat
+app's Swift core, `KaChatTests/KachatNamesVectors.json` there): every e2e-plan transaction plus
+edge cases, with the builder inputs and every byte a port must reproduce (preimages, sighashes,
+signature scripts, txid, masses, fee), and asserts each measured compute budget fits the fixed
+table an app without a script engine commits. `kachat-names-vectors check <file>` validates
+transactions a port built with that fixed table (signing its placeholders with the vectors' key).
 `tests/live_readonly.rs` (ignored by default) connects to testnet-10 (GetInfo, network, an empty
 GetUtxosByAddresses) and walks a minute of chain with the scanner (2026-10-01: 332 chain blocks,
 21,727 accepted transactions, 3.5 s, nothing misdecoded).
