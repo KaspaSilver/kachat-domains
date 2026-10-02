@@ -32,7 +32,7 @@
       "hi": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
     }
   },
-  "registryCovenantId": "9444187f09a3e77450e125d448b21eb79b3c54b692a5b3f3e8af38343b9a7a51",
+  "registryCovenantId": "82f4315c8f7b3e0e76fc2f77466fe7651d2c1fac4e0b5810d4da878a9cfa0f89",
   "contracts": {
     "KachatName": {
       "bytecodeLen": 3108,
@@ -78,13 +78,13 @@
       },
       "prefixLen": 1,
       "suffixLen": 872,
-      "templateHash": "bff7b79aef45119fe3dededd9a524893181649d16466fa2db578c63e689ed326",
+      "templateHash": "ef0b5ba649d8e0e100b2d9b3856dd41be47ef49937bda9b2e822a5fad7466d6e",
       "dispatchTags": {
         "accept": "9d4043b4",
         "refund": "777f5b11",
         "withdraw": "80344ff1"
       },
-      "bytecodeSha256": "3f48d55422f251791c630b2606f656df092c684517f62c25ffbbdc080655d680"
+      "bytecodeSha256": "0e5469ce9746d1ce7c307ee65a3ddff351c0c7cbc08bf93cd091089c0385631a"
     }
   }
 }
