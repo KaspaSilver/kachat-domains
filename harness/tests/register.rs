@@ -53,9 +53,13 @@ fn registers_several_years_up_front() {
 
 #[test]
 fn multi_year_registration_must_pay_every_year() {
+    // max years (2), paying one sompi short of 2 years (far more than 1 year)
     let kit = Kit::new();
-    let mut r = register(&kit, b"bob", 3);
-    r.adjust_fee(-(NET_FEE as i64) - 1); // one sompi short of 3 years
+    let mut r = register(&kit, b"bob", kit.params.max_years);
+    r.adjust_fee(-(NET_FEE as i64));
+    assert_eq!(r.fee() as u64, kit.params.price_for(3) * kit.params.max_years as u64);
+    ok(&kit, &r.spec, r.block);
+    r.adjust_fee(-1);
     gap_fails(&kit, &r);
 }
 

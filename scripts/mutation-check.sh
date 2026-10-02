@@ -42,6 +42,7 @@ mutate $G 'require(n[n.length - 1] != 0x2d, "no trailing hyphen");' '' "gap: tra
 mutate $G 'require(OpCovOutputCount(covId) == 3, "three registry outputs");' '' "gap: register output count (redundant with AuthOutputCount(0) == 3 + one registry input)"
 mutate $G 'require(tx.outputs[2].value == bond, "name bond");' '' "gap: name bond value"
 mutate $G 'require(tx.inputs.length <= MAX_INPUTS, "at most 8 inputs");' '' "gap: input bound (redundant with the compiler loop guard, which TUTORIAL.md says not to rely on)"
+mutate $G 'price: 0, periodStart: now, expiresAt: expiry' 'price: 0, periodStart: now - 1, expiresAt: expiry' "gap: register periodStart = now"
 mutate $G 'require(seated.key == hi, "name at hi");' '' "gap: merge name adjacency"
 mutate $G 'require(succ.lo == hi, "successor starts at hi");' '' "gap: merge successor adjacency"
 mutate $G 'require(tx.outputs[0].value == gapValue, "merged gap value");' '' "gap: merged gap value"
@@ -53,8 +54,39 @@ mutate $N 'require(OpCovInputCount(covId) == 1, "one registry input");
 mutate $N 'require(tx.outputs[out].value == bond, "continuation keeps the bond");' '' "name: continuation value"
 mutate $N 'require(tx.outputs[payout].value >= price, "payout covers the price");' '' "name: buy payout value"
 mutate $N 'require(tx.outputs[payout].scriptPubKey == byte[](sellerLock), "payout to the seller");' '' "name: buy payout script"
-mutate $N 'require(years <= maxYears, "years <= maxYears");' '' "name: renew max years"
+# extend (its checks come first in the file, so a first-occurrence match is extend's)
+mutate $N 'require(years >= 1, "years >= 1");' '' "name: extend years >= 1"
+mutate $N 'require(years <= maxYears, "years <= maxYears");' '' "name: extend max years"
+mutate $N 'require(expiresAt <= MAX_EXPIRES_AT, "expiry cap");' '' "name: extend expiry cap"
+mutate $N 'require(newExpiry <= periodStart + maxYears * YEAR_MS, "at most maxYears past periodStart");' '' "name: extend period cap"
+mutate $N 'require(newExpiry <= periodStart + maxYears * YEAR_MS, "at most maxYears past periodStart");' 'require(newExpiry <= periodStart + maxYears * YEAR_MS + 1, "at most maxYears past periodStart");' "name: extend period cap off by one ms"
+mutate $N 'require(minerFee() >= renewPrice() * years, "extension paid as miner fee");' 'require(minerFee() >= renewPrice(), "extension paid as miner fee");' "name: extend price x years"
+mutate $N 'require(minerFee() >= renewPrice() * years, "extension paid as miner fee");' '' "name: extend paid at all"
+mutate $N 'periodStart: periodStart, expiresAt: newExpiry' 'periodStart: expiresAt, expiresAt: newExpiry' "name: extend keeps periodStart"
+# renew (multi-line context: the lines right before its time lock)
+mutate $N 'require(years >= 1, "years >= 1");
+        require(years <= maxYears, "years <= maxYears");
+        require(expiresAt <= MAX_EXPIRES_AT, "expiry cap");
+        require(tx.time' 'require(years <= maxYears, "years <= maxYears");
+        require(expiresAt <= MAX_EXPIRES_AT, "expiry cap");
+        require(tx.time' "name: renew years >= 1"
+mutate $N 'require(years <= maxYears, "years <= maxYears");
+        require(expiresAt <= MAX_EXPIRES_AT, "expiry cap");
+        require(tx.time' 'require(expiresAt <= MAX_EXPIRES_AT, "expiry cap");
+        require(tx.time' "name: renew max years"
+mutate $N 'require(expiresAt <= MAX_EXPIRES_AT, "expiry cap");
+        require(tx.time' 'require(tx.time' "name: renew expiry cap"
+mutate $N 'require(tx.time >= temporal(expiresAt - renewWindowMs));' '' "name: renew window (time lock)"
+mutate $N 'require(tx.time >= temporal(expiresAt - renewWindowMs));' 'require(tx.time >= temporal(expiresAt - renewWindowMs - 1));' "name: renew window off by one ms"
 mutate $N 'require(minerFee() >= renewPrice() * years, "renewal paid as miner fee");' 'require(minerFee() >= renewPrice(), "renewal paid as miner fee");' "name: renew price x years"
+mutate $N 'require(minerFee() >= renewPrice() * years, "renewal paid as miner fee");' '' "name: renew paid at all"
+mutate $N 'periodStart: expiresAt, expiresAt: expiresAt + years * YEAR_MS' 'periodStart: periodStart, expiresAt: expiresAt + years * YEAR_MS' "name: renew starts the period at the old expiry"
+# the period travels unchanged through transfer, list, buy
+mutate $N 'owner: newOwner, price: 0, periodStart: periodStart' 'owner: newOwner, price: 0, periodStart: expiresAt' "name: transfer keeps periodStart"
+mutate $N 'price: newPrice, periodStart: periodStart' 'price: newPrice, periodStart: expiresAt' "name: list keeps periodStart"
+mutate $N 'require(tx.outputs[payout].value >= price, "payout covers the price");
+        validateOutputState(out, State { key: key, name: name, owner: newOwner, price: 0, periodStart: periodStart' 'require(tx.outputs[payout].value >= price, "payout covers the price");
+        validateOutputState(out, State { key: key, name: name, owner: newOwner, price: 0, periodStart: expiresAt' "name: buy keeps periodStart"
 mutate $N 'require(tx.time >= temporal(expiresAt + graceMs));' '' "name: reclaim after grace"
 mutate $N 'require(tx.outputs[1].scriptPubKey == byte[](ownerLock), "bond to the last owner");' '' "name: reclaim bond script"
 mutate $N 'require(tx.outputs[1].value >= bond, "bond returned");' '' "name: reclaim bond value"
@@ -63,6 +95,7 @@ mutate $O 'require(this.activeInputIndex == nameIdx + 1, "offer right after its 
 mutate $O 'require(OpInputCovenantId(nameIdx) == registryCovId, "registry name");' '' "offer: registry id"
 mutate $O 'require(cur.key == key, "the wanted name");' '' "offer: wanted key (redundant: the continuation is validated with key = the offer key)"
 mutate $O 'require(tx.outputs[payout].value >= tx.inputs[this.activeInputIndex].value - maxFee, "payout covers the offer");' '' "offer: accept payout value"
+mutate $O 'periodStart: cur.periodStart' 'periodStart: cur.expiresAt' "offer: accept keeps periodStart"
 mutate $O 'require(tx.daa >= refundAfter);' '' "offer: refund after"
 mutate $O 'require(tx.inputs.length == 1, "refund alone");' '' "offer: refund alone"
 mutate $O 'require(tx.outputs[0].scriptPubKey == byte[](buyerLock), "refund to the buyer");' '' "offer: refund script"

@@ -407,6 +407,15 @@ fn extend_must_pay_the_tier_price_per_year() {
         spec.outputs.last_mut().unwrap().value += 1;
         name_fails(&kit, &spec);
     }
+    // 2 years (from a state with room for them) must pay 2 years: one sompi short fails
+    let n = name_case(&kit, b"alice", 0);
+    let roomy = n.with_fields(&kit, NameFields { period_start: NOW_MS + 5 * YEAR_MS, ..n.fields.clone() });
+    let mut spec = extend(&kit, &roomy, 2);
+    spec.outputs.last_mut().unwrap().value += NET_FEE;
+    assert_eq!(spec.fee() as u64, 2 * kit.params.renew_price_for(5));
+    ok(&kit, &spec, active_block());
+    spec.outputs.last_mut().unwrap().value += 1;
+    name_fails(&kit, &spec);
     // the tier comes from the stored name
     let n = name_case(&kit, b"x", 0);
     let mut spec = extend(&kit, &n, 1);
