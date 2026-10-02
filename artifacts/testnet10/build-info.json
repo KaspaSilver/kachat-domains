@@ -31,7 +31,7 @@
       "hi": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
     }
   },
-  "registryCovenantId": null,
+  "registryCovenantId": "9444187f09a3e77450e125d448b21eb79b3c54b692a5b3f3e8af38343b9a7a51",
   "contracts": {
     "KachatName": {
       "bytecodeLen": 2002,
@@ -68,6 +68,21 @@
       },
       "bytecodeSha256": "6229ca00f9f98b500637df3d6b7e69e4ee08b7965aa6fe15270ea71061b3b2b1"
     },
-    "KachatOffer": "not built: set registryCovenantId after the genesis transaction"
+    "KachatOffer": {
+      "bytecodeLen": 897,
+      "stateSpan": {
+        "offset": 1,
+        "len": 75
+      },
+      "prefixLen": 1,
+      "suffixLen": 821,
+      "templateHash": "bbfdb8000e6374c583265b70665a642c9638dd66e0097bb2441d8c6d4fefe308",
+      "dispatchTags": {
+        "accept": "9d4043b4",
+        "refund": "777f5b11",
+        "withdraw": "80344ff1"
+      },
+      "bytecodeSha256": "47bc595a07035811fec0f5c2b2d802aab7eb48db21967561f699101f34fc9c3c"
+    }
   }
 }
