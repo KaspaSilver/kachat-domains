@@ -2,7 +2,9 @@
 
 Phase 1 of the `.kachat` name service (design: `KaChat/KACHAT_NAMES.md`): the Kaspa covenant
 contracts in Silverscript, and a Rust harness that runs every entry through rusty-kaspa's own
-consensus transaction validator. **Local only - nothing here has been deployed to any network.**
+consensus transaction validator. Phase 2 (`kachat-domains` repo, this checkout): the testnet-10
+deployment CLI, see [Testnet-10 deployment (phase 2)](#testnet-10-deployment-phase-2).
+**Nothing here has been deployed to any network yet** (no genesis; `registryCovenantId` is null).
 
 ```
 contracts/      KachatGap.sil  KachatName.sil  KachatOffer.sil
@@ -11,6 +13,9 @@ artifacts/      <net>/KachatName.json KachatGap.json build-info.json   (scripts/
 scripts/        build.sh build.py mutation-check.sh
 harness/        Rust crate: src/lib.rs (kit), src/scenarios.rs (valid txs), tests/*.rs
 tools/          disasm.py (+ opcode table of rusty-kaspa a41a333)
+tools/kachat-names-cli/   phase 2: the `kachat-names` testnet-10 CLI (Rust, same rusty-kaspa rev)
+manifests/      kachat-names-testnet-10.json once a real genesis exists (dryrun/ is scratch, gitignored)
+.secrets/       deployer key + salted commits (gitignored, mode 600)    state/  local registry cache (gitignored)
 ```
 
 ## Contracts
@@ -138,6 +143,7 @@ renew 1, release 10, reclaim 0, accept 3, withdraw 10, refund 0, commit/P2PK 10.
 cd harness && cargo test           # 120 tests, ~3 s after the first build
 cargo test --test report -- --nocapture   # sizes and the cost table above
 ../scripts/mutation-check.sh       # delete each security check in turn, show which tests catch it
+cd ../tools/kachat-names-cli && cargo test   # phase-2 CLI: 23 tests (see "Testnet-10 deployment")
 ```
 
 The harness depends on the same rusty-kaspa revision silverscript v1.0.0 pins (`a41a333`) and on
@@ -166,6 +172,203 @@ input's script fails (and not merely on its budget) and that the whole transacti
 least one test except five that are redundant by construction (each labelled with what covers it:
 the register output count, the explicit input bound, each half of the name's one-input/one-output
 pair - removing both is caught - and the offer's key check).
+
+## Testnet-10 deployment (phase 2)
+
+`tools/kachat-names-cli` builds the `kachat-names` binary: the operations of the
+[transaction shapes](#transaction-shapes-the-app-must-build) table against a real testnet-10
+node. It is a second crate on the harness's rusty-kaspa revision (`a41a333`, rusty-kaspa 2.0.1;
+testnet-10 nodes seen on 2026-10-01 run 2.0.1 and 2.1.0) and reuses the harness kit, so every
+transaction it prints was built, signed and validated by exactly the code the 120 contract tests
+use.
+
+**Safety rules built into the tool**
+
+- **Testnet-10 only.** There is no mainnet mode: the params file, address prefix (`kaspatest:`),
+  consensus params (`TESTNET_PARAMS`) and network name are constants. Every command that talks to
+  a node first requires it to report network `testnet-10`, be synced and keep a UTXO index;
+  `--submit` re-checks the network right before sending. A transfer target must be a
+  `kaspatest:` Schnorr (P2PK) address.
+- **Dry run by default.** Every spending command builds the transaction, validates it locally
+  (`TransactionValidator`: isolation + header finality at the virtual's median time / DAA +
+  UTXO context with Full flags, at the node's virtual DAA score), checks mempool standardness
+  (P2SH sig-op scan, standard outputs), and prints a summary: inputs with outpoints, values,
+  sequences and compute budgets (and script units used), outputs with covenant bindings and
+  addresses, fee split into price and network fee, size and compute / transient / storage
+  mass, lock time and its domain. Only `--submit` broadcasts, and only a transaction that passed
+  those checks. Read-only RPCs used: GetServerInfo, GetInfo, GetBlockDagInfo, GetFeeEstimate,
+  GetUtxosByAddresses, GetVirtualChainFromBlockV2. The only write is SubmitTransaction.
+- **One key.** `keygen` creates a fresh secp256k1 Schnorr key at
+  `.secrets/testnet10-deployer.key` (directory 700, file 600, refuses to overwrite, refuses unless
+  `.secrets/` is in `.gitignore`) and prints only its `kaspatest:` address. `load` refuses a key
+  file readable by others. The deployer is the owner, buyer and payer in every command; the tool
+  reads no other key or seed. Salts of pending commits are kept in `.secrets/commits.json` (600).
+
+### Setup
+
+```bash
+brew install protobuf                     # protoc, needed by rusty-kaspa's gRPC crates
+cd tools/kachat-names-cli && cargo build --release && cd ../..
+alias kachat-names=$PWD/tools/kachat-names-cli/target/release/kachat-names
+kachat-names keygen                       # once: prints the deployer's kaspatest: address
+kachat-names node-info                    # read-only: GetInfo, network, DAA, median time, deployer UTXOs
+```
+
+The binary finds the checkout from the current directory (or `--repo`, or
+`KACHAT_DOMAINS_ROOT`); nothing in it is an absolute path. Node: `--node grpc://host:16210`, or
+discovery through the testnet-10 DNS seeders of rusty-kaspa's `TESTNET_PARAMS`
+(`seeder1-tn.kaspad.net`, `dnsseeder-kaspa-testnet.x-con.at`, `n-testnet-10.kaspa.ws`; the
+`seeder{1,2}-testnet.kaspad.net` names are tried too but do not resolve today): the first seeded
+peer that answers on 16210 and is synced, UTXO-indexed and on testnet-10.
+
+**Deployer:** `kaspatest:qz5xdn6e0clxsyey4k7pzhkrfjnhg6qneac0d0lyl8pk7tya6vyysf8pt3r8m`.
+**Fund it with 300 TKAS** (the plan below needs at least 233 TKAS; it spends 178.13 TKAS and
+leaves about 121.87 TKAS). `kachat-names balance` shows the UTXOs.
+
+### Registry state without an indexer
+
+A gap or name UTXO sits at the P2SH address of `prefix ‖ state ‖ suffix`, so its address commits
+to its whole state: a UTXO at that address carrying the registry covenant id *is* that state,
+live. The CLI keeps the decoded states in `state/registry-testnet-10.json` (gitignored),
+starting from the manifest's genesis gap, and moves them forward with one decoder
+(`Registry::apply`): it reads each registry input's signature script (dispatch tag, arguments,
+revealed redeem = the tracked state), predicts every registry output the entry must create, and
+accepts the transaction only if those predictions match the bound outputs one to one (anything
+unexplained is refused and the state is left untouched). Two feeds use it:
+
+- every transaction this CLI submits (applied right after the node accepts it), and
+- `kachat-names scan`: walks the selected chain from the checkpoint (the sink seen just before
+  the genesis was submitted) with GetVirtualChainFromBlockV2 (High verbosity: accepted
+  transactions with inputs, signature scripts and covenant bindings), 20 confirmations deep,
+  for everyone else's registry transactions.
+
+`kachat-names status` decodes all gaps, names (owner, listing, expiry phase), tracked offers and
+open commits and checks each against GetUtxosByAddresses (live, with the registry covenant id);
+it also checks the gaps and names tile the key space. Before spending, every command fetches the
+live UTXO of each registry input the same way, so a stale state fails loudly instead of building
+on a spent outpoint. Limits: the scan start must still be inside the node's pruning window (scan
+at least daily), testnet-10 currently carries ~200 transactions per chain block (a minute of
+chain scans in ~3.5 s), and a reorg of an already-scanned block is only reported (`scan
+--from-genesis` rebuilds). Offers carry no covenant id; the CLI tracks the ones it creates. The
+indexer replaces all of this later.
+
+### Genesis, manifest and the offer artifact
+
+```bash
+kachat-names genesis                      # dry run against the node (needs the funded deployer)
+kachat-names genesis --assume-utxo 300    # dry run before funding: a synthetic 300-TKAS UTXO
+kachat-names genesis --submit             # the real one
+```
+
+The genesis spends one deployer UTXO; output 0 is the lone gap `(00..00, ff..ff)` bound to
+`covenant_id(that outpoint, [(0, gap)])`, output 1 is change, nothing else is authorized
+(exactly `genesis_spec`, the shape the harness's genesis tests use). With `--submit` it writes
+`manifests/kachat-names-testnet-10.json` (params, compiler, artifacts with template hashes and
+file hashes, the offer's template hash for this registry id, the genesis outpoint, txid and
+authorized output, `registryCovenantId`, the scan checkpoint), fills `registryCovenantId` in
+`params/testnet10.json` (the only edit to params, by a real genesis only), and initializes the
+state. Then build the offer artifact and commit:
+
+```bash
+./scripts/build.sh      # now also writes artifacts/testnet10/KachatOffer.json for the registry id
+git add params/testnet10.json artifacts/testnet10 manifests/kachat-names-testnet-10.json
+```
+
+Every later command verifies the manifest before trusting it: the registry id must equal
+`covenant_id(genesis outpoint, [genesis gap])` recomputed from the templates, and the gap, name
+and offer template hashes must match; if `artifacts/testnet10/KachatOffer.json` exists it must be
+byte-identical to the in-process compile for that id. The dry run writes the would-be manifest
+and `params-testnet10.json` to `manifests/dryrun/` (gitignored) and, when the pinned `silverc` is
+present (`$SILVERSCRIPT_DIR`, default `~/silverscript`), runs
+`python3 scripts/build.py <silverc> manifests/dryrun/params-testnet10.json manifests/dryrun/artifacts`
+and checks the offer it builds equals the in-process compile. Done on 2026-10-01 with
+`--assume-utxo 300`: hypothetical registry id `19ef6996…261c5b`, offer 897 B, template hash
+`402095d3…16ac`, identical (and the rebuilt gap and name artifacts are byte-identical to the
+committed ones).
+
+### The end-to-end run
+
+`kachat-names e2e-plan` prints this list; `--simulate` also prints every transaction. The plan
+is run in-process first through the same builders with synthetic UTXOs (each transaction
+validated by the consensus validator and spending the previous transactions' outputs), which is
+where the budget comes from: 19 transactions, prices 175 TKAS (miner fee), network fees
+0.128 TKAS, 3 TKAS left locked in the registry (two gaps and alpha-tn's bond), 178.13 TKAS spent
+in total; the peak need (the 50-TKAS self-purchase after the registrations and renewal) makes
+233 TKAS the least funding that completes it, re-checked by a second simulation. A 4-character
+name (250 TKAS a year, plus 2 TKAS bond and gap) does not fit next to the plan, so none is
+included. Names are 8 characters (the 5+ tier, 35 TKAS a year). Each command waits until its
+transaction's output 0 shows up in the UTXO index before returning, so the next one sees it.
+
+| # | Command (`--submit` each) | What it proves on testnet-10 |
+|---|---|---|
+| 1 | `genesis`, then `./scripts/build.sh` + commit | the registry id is minted by one ordinary UTXO; the genesis covenant group holds only the gap; the manifest binding |
+| 2-4 | `commit alpha-tn`, `commit bravo-tn`, `commit lapse-tn` | salted commits: only `P2SH(commitment, owner)` is public |
+| 5 | wait 600 DAA (~1 min); `status` shows "mature" | the commit sequence lock (consensus `check_sequence_lock`) in the mempool |
+| 6 | `register alpha-tn --years 1` | a 35-TKAS miner fee relays and mines; the time-locked register (`lockTime = now` = wall clock − 3 min, never past the median time) is final at once; a ~120k-gram storage-mass transaction relays; compute budgets 6/10/10 |
+| 7 | `register bravo-tn --years 2` | 70-TKAS fee; registering into a gap created by a registration |
+| 8 | `register lapse-tn --years 1 --backdate-days 376` | a backdated `now` (only "not in the future" is checked): already past expiresAt + grace |
+| 9 | `renew alpha-tn --years 1` | permissionless renewal, 35-TKAS fee, expiry from the old expiry |
+| 10 | `transfer alpha-tn <deployer address>` | owner SIGHASH_ALL signature, continuation keeps bond and expiry |
+| 11-12 | `list alpha-tn 50`, `buy alpha-tn` | listing; purchase with the payout right after the continuation (seller = buyer = the deployer, so the 50 TKAS come straight back) |
+| 13-14 | `offer bravo-tn 10 --refund-after +100000`, `accept-offer bravo-tn` | an offer P2SH baked with this registry id; accept = `transfer(buyer)` + `offer.accept(0)`, fee out of the offer (≤ maxFee 0.02) |
+| 15-17 | `offer alpha-tn 5 --refund-after +600`, wait 601 DAA, `refund-offer alpha-tn` | the DAA-domain time-locked refund (1 in / 1 out) is accepted once final |
+| 18-19 | `offer alpha-tn 3 --refund-after +100000`, `withdraw-offer alpha-tn` | buyer withdrawal |
+| 20 | `release bravo-tn` | the 3-input exit (merge, release, absorbed): bond and a gap value come back |
+| 21 | `reclaim lapse-tn` | the permissionless exit, timestamp-domain lock time `expiresAt + grace`: bond to the last owner at output 1, bounty to the caller |
+| - | `status --scan` | the scanner rebuilds the same state from the chain; every tracked UTXO is live |
+
+**Reclaim on testnet:** names are yearly and the grace is 10 days, so reclaiming a name that was
+registered normally takes 1 year + 10 days on testnet too. Step 8 registers `lapse-tn` with
+`now` backdated 376 days (the gap only proves `now` is not in the future), so its `expiresAt +
+grace` is already a day in the past and step 21 can run at once. The price paid for it buys a year
+that is already over.
+
+### Mempool questions still open (what the run answers)
+
+1. **Relay of 35-8,000 TKAS fees.** Consensus accepts any fee; whether nodes relay and miners mine
+   a transaction whose fee is thousands of times its mass-based fee is what steps 6-9 check for
+   35 and 70 TKAS. The 4000 × 2 = 8,000-TKAS case (1-character names) is not exercised: it needs
+   8,000 TKAS. SubmitTransaction has no high-fee guard at 2.0.1; wallet libraries that add one
+   (and the app) must exempt register and renew.
+2. **Standard-mass relaxation.** Before Toccata the mempool caps each mass dimension at 100,000
+   grams; a registration has ~120k grams of storage mass (README open issue 6). At 2.0.1 the cap
+   is lifted from 30 minutes before Toccata's activation (testnet-10: DAA 467,579,632, May 2026),
+   so it should relay; nodes older than the relaxation would drop it. Step 6 is the check.
+3. **Time-locked transactions.** The mempool validates against the virtual's median time and DAA
+   and rejects a transaction that is not yet final; there is no queue of future-dated
+   transactions. So `register` uses `now = min(wall clock − 3 min, median time − 1 s)`, `reclaim`
+   and `refund-offer` are refused locally until their lock time has passed (the dry run says how
+   long), and the commit's 600-DAA sequence lock is checked against the virtual DAA. Steps 6, 15-17
+   and 21 confirm the relay side.
+4. **Congestion.** Testnet-10 carried ~200 transactions per chain block and up to 4,400 mempool
+   transactions on 2026-10-01; the normal feerate estimate was the 100 sompi/gram relay floor.
+   The CLI pays `max(estimate, 100) × max(compute, normalized transient mass)` (0.002-0.021 TKAS)
+   and states it in every summary.
+
+### Tests
+
+```bash
+cd tools/kachat-names-cli
+cargo test                                   # 23 tests: builders (16), rpc_paths (2), keys (2), util (3)
+cargo test --test live_readonly -- --ignored --nocapture   # read-only, a real testnet-10 node
+```
+
+`tests/builders.rs` runs every command's builder against synthetic UTXOs through the consensus
+validator (and each input under its committed compute budget), checks the fee is exactly price +
+network fee and pays the relay floor, and reuses the harness scenarios: the CLI's register is
+byte-identical to `scenarios::register` in its registry part (outputs 0-2, the gap's whole
+signature script, lock time, sequences), the genesis gives the harness's registry id for the same
+outpoint, and the whole e2e plan runs and balances (and fails with 30 TKAS less than the computed
+minimum). It also covers commit maturity, the 8-input bound of register, owner checks, the
+offer/reclaim time locks, the decoder refusing a forged registry output, the state JSON round
+trip, and the `kaspatest:`-only address guard. `tests/rpc_paths.rs` runs every transaction of
+the simulated plan through the SubmitTransaction conversion (the node decodes the identical
+transaction: id, storage-mass commitment, compute budgets) and through the scanner's
+RpcOptionalTransaction view, which rebuilds exactly the state the CLI tracked.
+`tests/keys.rs` covers the keygen guards.
+`tests/live_readonly.rs` (ignored by default) connects to testnet-10 (GetInfo, network, an empty
+GetUtxosByAddresses) and walks a minute of chain with the scanner (2026-10-01: 332 chain blocks,
+21,727 accepted transactions, 3.5 s, nothing misdecoded).
 
 ## Deviations from KACHAT_NAMES.md (need a doc update)
 
@@ -211,10 +414,11 @@ pair - removing both is caught - and the offer's key check).
    accept old offers for that name. Offers are refundable by anyone after `refundAfter`.
 9. **Time**: `now` and the reclaim/expiry use the block's past median time (lags wall clock
    ~2.2 min). Registering with `now = wall clock − 3 min` loses those minutes of the paid year.
-10. **Mempool policy not exercised**: relay of 35-8,000 KAS fees, the post-Toccata standard-mass
-    relaxation window, and mempool handling of the time-locked transactions must be confirmed on
-    TN10 (phase 2). The harness checks consensus validity, the P2SH sig-op scan and output
-    standardness only.
+10. **Mempool policy not exercised yet**: relay of 35-8,000 KAS fees, the post-Toccata
+    standard-mass relaxation window, and mempool handling of the time-locked transactions must be
+    confirmed on TN10. The harness and the CLI check consensus validity, the P2SH sig-op scan and
+    output standardness only; the phase-2 run answers the rest (see
+    [Mempool questions still open](#mempool-questions-still-open-what-the-run-answers)).
 11. **Compiler quirks met**: the pragma must be `^0.1.0`; hex literals over 8 bytes need a cast
     (`byte[32](0x…)`); `OpTxInputSeq` returns raw `byte[8]` (low 32 bits are widened with a `0x00`
     byte before comparing); `checkSig` on a malformed key/signature is UB in Silverscript terms -
