@@ -75,6 +75,16 @@ All are version-1 transactions with output covenant bindings and per-input compu
 | offer accept | 0 name `transfer(buyer)`, 1 offer `accept(0)` | 0 continuation (buyer), 1 payout to owner | - |
 | offer refund | 0 offer `refund` (alone) | 0 to the buyer | `lockTime = refundAfter` (DAA), `sequence = 0` |
 
+**Payloads** (the contracts never read them; counted in mass and fee like any byte). The
+transaction that creates an offer carries `kchat:1:offer:<keyHex>:<buyerXonlyHex>:<refundAfterDaa>`
+(UTF-8, refundAfter in decimal): offers have no covenant id and a P2SH hides the state, so this
+marker is how an indexer finds them; it is trusted only if
+`P2SH(offerPrefix ‖ offerState(key, buyer, refundAfter) ‖ offerSuffix)` is one of the outputs.
+register, renew, transfer, list, buy, release, reclaim and offer accept carry the informational
+`kchat:1:name:<op>:<name>` (op = the entry name, `accept` for an accepted offer). The commit,
+genesis, offer withdraw and offer refund carry none; a commit must not, or the salted commit
+would reveal the name.
+
 ## Params (`params/*.json`, identical on testnet-10 and mainnet)
 
 | Param | Value | Baked into |
@@ -143,7 +153,7 @@ renew 1, release 10, reclaim 0, accept 3, withdraw 10, refund 0, commit/P2PK 10.
 cd harness && cargo test           # 120 tests, ~3 s after the first build
 cargo test --test report -- --nocapture   # sizes and the cost table above
 ../scripts/mutation-check.sh       # delete each security check in turn, show which tests catch it
-cd ../tools/kachat-names-cli && cargo test   # phase-2 CLI: 23 tests (see "Testnet-10 deployment")
+cd ../tools/kachat-names-cli && cargo test   # phase-2 CLI: 24 tests (see "Testnet-10 deployment")
 ```
 
 The harness depends on the same rusty-kaspa revision silverscript v1.0.0 pins (`a41a333`) and on
@@ -195,7 +205,7 @@ use.
   (P2SH sig-op scan, standard outputs), and prints a summary: inputs with outpoints, values,
   sequences and compute budgets (and script units used), outputs with covenant bindings and
   addresses, fee split into price and network fee, size and compute / transient / storage
-  mass, lock time and its domain. Only `--submit` broadcasts, and only a transaction that passed
+  mass, lock time and its domain, and the payload. Only `--submit` broadcasts, and only a transaction that passed
   those checks. Read-only RPCs used: GetServerInfo, GetInfo, GetBlockDagInfo, GetFeeEstimate,
   GetUtxosByAddresses, GetVirtualChainFromBlockV2. The only write is SubmitTransaction.
 - **One key.** `keygen` creates a fresh secp256k1 Schnorr key at
@@ -234,7 +244,9 @@ starting from the manifest's genesis gap, and moves them forward with one decode
 (`Registry::apply`): it reads each registry input's signature script (dispatch tag, arguments,
 revealed redeem = the tracked state), predicts every registry output the entry must create, and
 accepts the transaction only if those predictions match the bound outputs one to one (anything
-unexplained is refused and the state is left untouched). Two feeds use it:
+unexplained is refused and the state is left untouched). Offers are found through their
+`kchat:1:offer:` payload marker, accepted only when an output really is that offer. Two feeds
+use it:
 
 - every transaction this CLI submits (applied right after the node accepts it), and
 - `kachat-names scan`: walks the selected chain from the checkpoint (the sink seen just before
@@ -249,8 +261,8 @@ live UTXO of each registry input the same way, so a stale state fails loudly ins
 on a spent outpoint. Limits: the scan start must still be inside the node's pruning window (scan
 at least daily), testnet-10 currently carries ~200 transactions per chain block (a minute of
 chain scans in ~3.5 s), and a reorg of an already-scanned block is only reported (`scan
---from-genesis` rebuilds). Offers carry no covenant id; the CLI tracks the ones it creates. The
-indexer replaces all of this later.
+--from-genesis` rebuilds). The indexer replaces all of this later
+(`KaChat/KACHAT_NAMES_INDEXER.md` B3/B4 describe the same decoding).
 
 ### Genesis, manifest and the offer artifact
 
@@ -292,7 +304,7 @@ committed ones).
 is run in-process first through the same builders with synthetic UTXOs (each transaction
 validated by the consensus validator and spending the previous transactions' outputs), which is
 where the budget comes from: 19 transactions, prices 175 TKAS (miner fee), network fees
-0.128 TKAS, 3 TKAS left locked in the registry (two gaps and alpha-tn's bond), 178.13 TKAS spent
+0.129 TKAS, 3 TKAS left locked in the registry (two gaps and alpha-tn's bond), 178.13 TKAS spent
 in total; the peak need (the 50-TKAS self-purchase after the registrations and renewal) makes
 233 TKAS the least funding that completes it, re-checked by a second simulation. A 4-character
 name (250 TKAS a year, plus 2 TKAS bond and gap) does not fit next to the plan, so none is
@@ -310,7 +322,7 @@ transaction's output 0 shows up in the UTXO index before returning, so the next 
 | 9 | `renew alpha-tn --years 1` | permissionless renewal, 35-TKAS fee, expiry from the old expiry |
 | 10 | `transfer alpha-tn <deployer address>` | owner SIGHASH_ALL signature, continuation keeps bond and expiry |
 | 11-12 | `list alpha-tn 50`, `buy alpha-tn` | listing; purchase with the payout right after the continuation (seller = buyer = the deployer, so the 50 TKAS come straight back) |
-| 13-14 | `offer bravo-tn 10 --refund-after +100000`, `accept-offer bravo-tn` | an offer P2SH baked with this registry id; accept = `transfer(buyer)` + `offer.accept(0)`, fee out of the offer (≤ maxFee 0.02) |
+| 13-14 | `offer bravo-tn 10 --refund-after +100000`, `accept-offer bravo-tn` | an offer P2SH baked with this registry id, announced by its payload marker (the scanner finds it); accept = `transfer(buyer)` + `offer.accept(0)`, fee out of the offer (≤ maxFee 0.02) |
 | 15-17 | `offer alpha-tn 5 --refund-after +600`, wait 601 DAA, `refund-offer alpha-tn` | the DAA-domain time-locked refund (1 in / 1 out) is accepted once final |
 | 18-19 | `offer alpha-tn 3 --refund-after +100000`, `withdraw-offer alpha-tn` | buyer withdrawal |
 | 20 | `release bravo-tn` | the 3-input exit (merge, release, absorbed): bond and a gap value come back |
@@ -349,7 +361,7 @@ that is already over.
 
 ```bash
 cd tools/kachat-names-cli
-cargo test                                   # 23 tests: builders (16), rpc_paths (2), keys (2), util (3)
+cargo test                                   # 24 tests: builders (17), rpc_paths (2), keys (2), util (3)
 cargo test --test live_readonly -- --ignored --nocapture   # read-only, a real testnet-10 node
 ```
 
@@ -361,14 +373,36 @@ signature script, lock time, sequences), the genesis gives the harness's registr
 outpoint, and the whole e2e plan runs and balances (and fails with 30 TKAS less than the computed
 minimum). It also covers commit maturity, the 8-input bound of register, owner checks, the
 offer/reclaim time locks, the decoder refusing a forged registry output, the state JSON round
-trip, and the `kaspatest:`-only address guard. `tests/rpc_paths.rs` runs every transaction of
+trip, the `kaspatest:`-only address guard, every payload (and that an offer marker matching no
+output is ignored), and pins the signature-script encoding an indexer decodes (see below).
+`tests/rpc_paths.rs` runs every transaction of
 the simulated plan through the SubmitTransaction conversion (the node decodes the identical
 transaction: id, storage-mass commitment, compute budgets) and through the scanner's
-RpcOptionalTransaction view, which rebuilds exactly the state the CLI tracked.
+RpcOptionalTransaction view, which rebuilds exactly the state the CLI tracked, offers included
+(found by their payload marker alone).
 `tests/keys.rs` covers the keygen guards.
 `tests/live_readonly.rs` (ignored by default) connects to testnet-10 (GetInfo, network, an empty
 GetUtxosByAddresses) and walks a minute of chain with the scanner (2026-10-01: 332 chain blocks,
 21,727 accepted transactions, 3.5 s, nothing misdecoded).
+
+### Signature-script encoding (what an indexer decodes)
+
+Pinned by `tests/builders.rs::signature_scripts_are_args_then_tag_then_redeem`. Every contract
+input's signature script is `<argument pushes, ABI order> <dispatch tag> <redeem>`, all
+canonical minimal pushes (silverscript-abi `ScriptBuilder::add_data` / `add_i64`):
+
+- **dispatch tag**: always a 4-byte push (`0x04` + 4 bytes; every contract has several entries).
+- **redeem** (`prefix ‖ state ‖ suffix`): `OP_PUSHDATA2` (`0x4d`, 2-byte little-endian length)
+  for all three contracts (gap 3,965 B, name 2,002 B, offer 897 B).
+- **`byte[32]`**: a 32-byte push (`0x20`). **`sig`**: a 65-byte push (`0x41`), 64-byte Schnorr
+  signature + `0x01`. **`byte[]`**: a minimal push of its bytes (register's `namePrefix` is a
+  1-byte push of `0x6b`, `nameSuffix` an `OP_PUSHDATA2` of 1,884 bytes; an empty `byte[]` would
+  be `OP_0`, a single byte 1-16 `OP_1`..`OP_16`, which a valid name never is).
+- **`int`**: a minimal script number, not a fixed width: 0 is `OP_0` (`0x00`), 1-16 are
+  `OP_1`..`OP_16` (`0x51`..`0x60`), -1 is `OP_1NEGATE`; anything else a 1-8 byte little-endian
+  sign-magnitude push. So `years = 1` is the single opcode `0x51`, `accept(0)` is `0x00`, `now`
+  (~1.8e12 ms) a 6-byte push, `list(50 TKAS)` a 5-byte push. State ints *inside* the redeem are
+  different: always 8 bytes behind an `0x08` push (`num8`).
 
 ## Deviations from KACHAT_NAMES.md (need a doc update)
 
