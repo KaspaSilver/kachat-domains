@@ -378,9 +378,15 @@ impl Kit {
     /// Two passes: sign with a provisional budget and measure every input's
     /// script units, then commit the smallest covering budget and sign again.
     pub fn build(&self, spec: &TxSpec) -> Built {
+        self.build_with_payload(spec, &[])
+    }
+
+    /// [`Kit::build`] with a transaction payload (signed over, counted in
+    /// the masses). The contracts never read the payload.
+    pub fn build_with_payload(&self, spec: &TxSpec, payload: &[u8]) -> Built {
         let entries: Vec<UtxoEntry> = spec.inputs.iter().map(|i| i.utxo.entry.clone()).collect();
         let provisional = vec![FALLBACK_BUDGET; spec.inputs.len()];
-        let tx = self.assemble(spec, &provisional);
+        let tx = self.assemble(spec, &provisional, payload);
         let mut budgets = Vec::with_capacity(spec.inputs.len());
         let mut used = Vec::with_capacity(spec.inputs.len());
         for i in 0..spec.inputs.len() {
@@ -395,18 +401,18 @@ impl Kit {
                 }
             }
         }
-        let tx = self.assemble(spec, &budgets);
+        let tx = self.assemble(spec, &budgets, payload);
         Built { tx, entries, budgets, used_units: used }
     }
 
-    fn assemble(&self, spec: &TxSpec, budgets: &[u16]) -> Transaction {
+    fn assemble(&self, spec: &TxSpec, budgets: &[u16], payload: &[u8]) -> Transaction {
         let inputs = spec
             .inputs
             .iter()
             .zip(budgets)
             .map(|(i, b)| TransactionInput::new_with_compute_budget(i.utxo.outpoint, vec![], i.sequence, *b))
             .collect();
-        let mut tx = Transaction::new(1, inputs, spec.outputs.clone(), spec.lock_time, SUBNETWORK_ID_NATIVE, 0, vec![]);
+        let mut tx = Transaction::new(1, inputs, spec.outputs.clone(), spec.lock_time, SUBNETWORK_ID_NATIVE, 0, payload.to_vec());
         let entries: Vec<UtxoEntry> = spec.inputs.iter().map(|i| i.utxo.entry.clone()).collect();
 
         // storage mass commitment (KIP-9), independent of signature scripts
