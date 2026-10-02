@@ -259,7 +259,26 @@ impl Live {
         let id = self.node.submit(&plan.built.tx).await?;
         ensure!(id == plan.txid(), "node returned txid {id}, expected {}", plan.txid());
         println!("SUBMITTED {id} to {}", self.node.url);
+        self.wait_accepted(plan).await;
         Ok(true)
+    }
+
+    /// Poll (read-only) until output 0 of the transaction is in the UTXO
+    /// index, so the next command sees its outputs. Gives up after 60 s.
+    async fn wait_accepted(&self, plan: &Plan) {
+        let tx = &plan.built.tx;
+        let Ok(addr) = spk_address(&tx.outputs[0].script_public_key) else { return };
+        let op = TransactionOutpoint::new(tx.id(), 0);
+        for _ in 0..60 {
+            if let Ok(found) = self.node.utxos(std::slice::from_ref(&addr)).await
+                && let Some((_, _, e)) = found.iter().find(|(_, o, _)| *o == op)
+            {
+                println!("accepted: output 0 is in the UTXO set (DAA {})", e.block_daa_score);
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        println!("not accepted within 60 s; check `status` / `balance` before the next command");
     }
 
     fn save_after(&self, kit: &Kit, reg: &mut Registry, plan: &Plan) -> Result<()> {
@@ -677,11 +696,12 @@ fn e2e_plan(paths: &Paths, simulate: bool) -> Result<()> {
     println!("# simulated with {} (every transaction built and validated locally, each spending the previous outputs):", fmt_kas(b.funding));
     println!("#   {}", plan::fmt_budget(&b));
     println!("#   least funding that completes the plan: {} (re-simulated: ends with {})", fmt_kas(need), fmt_kas(b_min.final_balance));
+    let four = 250 * SOMPI + 2 * SOMPI;
     println!(
-        "#   a 4-character name (250 TKAS per year) does not fit: {} leaves {} beyond the plan",
-        fmt_kas(PLANNED_FUNDING),
-        fmt_kas(PLANNED_FUNDING.saturating_sub(need))
+        "#   a 4-character name does not fit: 1 year is 250 TKAS + 2 TKAS (bond, gap), and the plan leaves {}",
+        fmt_kas(b.final_balance)
     );
+    debug_assert!(b.final_balance < four);
     println!("#   reclaim: names are yearly with a 10-day grace, so a plain reclaim needs 1 year + 10 days on testnet too;");
     println!("#   lapse-tn is registered with `now` backdated {} days so it is already past expiresAt + grace.", plan::LAPSE_BACKDATE_DAYS);
     println!();
