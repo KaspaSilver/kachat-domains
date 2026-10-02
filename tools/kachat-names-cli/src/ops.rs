@@ -149,8 +149,9 @@ impl Plan {
 enum Fee {
     /// add deployer funding inputs and a change output to the deployer
     Funded { max_inputs: usize },
-    /// no funding: take the network fee out of output `idx`
-    FromOutput { idx: usize, cap: Option<u64> },
+    /// no funding: take the network fee out of output `idx`, which must keep
+    /// at least `floor` (`MIN_CHANGE` everywhere but a cancelled commit)
+    FromOutput { idx: usize, cap: Option<u64>, floor: u64 },
 }
 
 struct Draft {
@@ -265,7 +266,7 @@ fn finish(env: &Env, wallet: &[Utxo], mut d: Draft, payload: Vec<u8>, fee: Fee) 
             let network = if with_change { est } else { est + change };
             (spec_of(&d.inputs, &d.outputs), network)
         }
-        Fee::FromOutput { idx, cap } => {
+        Fee::FromOutput { idx, cap, floor } => {
             // provisional value (zero would break the KIP-9 storage-mass formula)
             let total_in: u64 = d.inputs.iter().map(|(i, _)| i.utxo.entry.amount).sum();
             let others: u64 = d.outputs.iter().enumerate().filter(|(j, _)| *j != idx).map(|(_, (o, _))| o.value).sum();
@@ -279,7 +280,7 @@ fn finish(env: &Env, wallet: &[Utxo], mut d: Draft, payload: Vec<u8>, fee: Fee) 
             let v = total_in
                 .checked_sub(others + d.price_fee + fee)
                 .ok_or_else(|| anyhow!("{}: inputs do not cover the outputs and the fee", d.op))?;
-            ensure!(v >= MIN_CHANGE, "{}: output {idx} would be only {}", d.op, fmt_kas(v));
+            ensure!(v >= floor, "{}: output {idx} would be only {}", d.op, fmt_kas(v));
             d.outputs[idx].0.value = v;
             (spec_of(&d.inputs, &d.outputs), fee)
         }
@@ -406,7 +407,7 @@ pub fn genesis(t: &Templates, deployer: Keypair, wallet: &[Utxo], block: Block, 
         price_fee: 0,
         notes: vec![format!("registry covenant id = covenant_id({}, [(0, gap)]) = {registry_id}", crate::util::fmt_outpoint(&funding.outpoint))],
     };
-    let mut plan = finish(&env, &[], d, vec![], Fee::FromOutput { idx: 1, cap: None })?;
+    let mut plan = finish(&env, &[], d, vec![], Fee::FromOutput { idx: 1, cap: None, floor: MIN_CHANGE })?;
     plan.registry_id = Some(registry_id);
     ensure!(plan.built.tx.outputs.iter().filter(|o| o.covenant.is_some()).count() == 1, "genesis authorizes exactly one output");
     Ok((plan, env.kit))
@@ -445,6 +446,34 @@ pub fn commit(env: &Env, wallet: &[Utxo], name: &str, salt: [u8; 32]) -> Result<
         created_ms: env.wall_ms,
     });
     Ok(plan)
+}
+
+/// The least a cancelled commit may return: one 0.2 KAS input and one output
+/// just under it keep the KIP-9 storage mass small.
+pub const CANCEL_FLOOR: u64 = 10_000_000;
+
+/// Spend an unused commit back to its owner (the name was taken meanwhile, or
+/// the owner changed their mind): [commit (owner sig + redeem)] -> [P2PK(owner),
+/// the commit's value less the network fee]. No funding, no payload (the name
+/// stays hidden), sequence 0, lock time 0.
+pub fn cancel_commit(env: &Env, commit: &CommitRec, commit_utxo: &Utxo) -> Result<Plan> {
+    let me = env.me();
+    ensure!(commit.owner == me, "the commit for {} is for another owner", commit.name);
+    let redeem = commit_redeem(&commitment(commit.name.as_bytes(), &me, &commit.salt), &me);
+    ensure!(commit_utxo.entry.script_public_key == pay_to_script_hash_script(&redeem), "commit UTXO script does not match the stored salt");
+    ensure!(commit_utxo.entry.covenant_id.is_none(), "a commit carries no covenant id");
+    let d = Draft {
+        op: format!("cancel commit {}", commit.name),
+        inputs: vec![(
+            Input::new(commit_utxo.clone(), Unlock::Commit { redeem, key: env.deployer }),
+            format!("commit for {} (owner sig)", commit.name),
+        )],
+        outputs: vec![(TransactionOutput::new(0, env.my_spk()), "back to the owner".into())],
+        lock_time: 0,
+        price_fee: 0,
+        notes: vec![],
+    };
+    finish(env, &[], d, vec![], Fee::FromOutput { idx: 0, cap: None, floor: CANCEL_FLOOR })
 }
 
 /// `now` for a registration: wall clock - 3 min (the block median time lags
@@ -712,7 +741,7 @@ pub fn accept_offer(env: &Env, n: &NameRec, name_utxo: &Utxo, o: &OfferRec, offe
         price_fee: 0,
         notes: vec![format!("the network fee comes out of the offer (contract maxFee {})", fmt_kas(env.kit.params.offer_max_fee))],
     };
-    finish(env, &[], d, name_payload("accept", &name), Fee::FromOutput { idx: 1, cap: Some(env.kit.params.offer_max_fee) })
+    finish(env, &[], d, name_payload("accept", &name), Fee::FromOutput { idx: 1, cap: Some(env.kit.params.offer_max_fee), floor: MIN_CHANGE })
 }
 
 pub fn withdraw_offer(env: &Env, o: &OfferRec, utxo: &Utxo) -> Result<Plan> {
@@ -726,7 +755,7 @@ pub fn withdraw_offer(env: &Env, o: &OfferRec, utxo: &Utxo) -> Result<Plan> {
         price_fee: 0,
         notes: vec![],
     };
-    finish(env, &[], d, vec![], Fee::FromOutput { idx: 0, cap: None })
+    finish(env, &[], d, vec![], Fee::FromOutput { idx: 0, cap: None, floor: MIN_CHANGE })
 }
 
 /// Anyone refunds once DAA >= refundAfter: 1 input, 1 output, lock time =
@@ -750,7 +779,7 @@ pub fn refund_offer(env: &Env, o: &OfferRec, utxo: &Utxo) -> Result<Plan> {
         price_fee: 0,
         notes,
     };
-    finish(env, &[], d, vec![], Fee::FromOutput { idx: 0, cap: Some(env.kit.params.offer_max_fee) })
+    finish(env, &[], d, vec![], Fee::FromOutput { idx: 0, cap: Some(env.kit.params.offer_max_fee), floor: MIN_CHANGE })
 }
 
 // ---------------------------------------------------------------------------
@@ -796,7 +825,7 @@ pub fn release(env: &Env, x: ExitParts) -> Result<Plan> {
         price_fee: 0,
         notes: vec![],
     };
-    finish(env, &[], d, name_payload("release", &name), Fee::FromOutput { idx: 1, cap: None })
+    finish(env, &[], d, name_payload("release", &name), Fee::FromOutput { idx: 1, cap: None, floor: MIN_CHANGE })
 }
 
 /// Anyone reclaims a lapsed name: [merge, reclaim(), absorbed] -> [merged
@@ -833,5 +862,5 @@ pub fn reclaim(env: &Env, x: ExitParts) -> Result<Plan> {
         price_fee: 0,
         notes,
     };
-    finish(env, &[], d, name_payload("reclaim", &name), Fee::FromOutput { idx: 2, cap: None })
+    finish(env, &[], d, name_payload("reclaim", &name), Fee::FromOutput { idx: 2, cap: None, floor: MIN_CHANGE })
 }

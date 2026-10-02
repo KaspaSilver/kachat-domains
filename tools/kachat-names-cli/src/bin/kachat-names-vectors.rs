@@ -611,6 +611,17 @@ fn extra_cases(t: &Templates, registry_id: kaspa_hashes::Hash, wall: i64, tags: 
             tags,
         )?);
     }
+
+    // spend an unused commit back to its owner (the name was taken meanwhile)
+    {
+        let name = "taken-meanwhile";
+        let salt = [0x34; 32];
+        let cu = synthetic(0xc3, 0, ops::COMMIT_VALUE, pay_to_script_hash_script(&commit_redeem(&commitment(name.as_bytes(), &me, &salt), &me)), block.daa - 2_000, None);
+        let c = CommitRec { name: name.into(), owner: me, salt, value: ops::COMMIT_VALUE, outpoint: Some(cu.outpoint), used_by: None, created_ms: 0 };
+        let plan = ops::cancel_commit(&env, &c, &cu)?;
+        ensure!(plan.built.tx.outputs.len() == 1 && plan.built.tx.outputs[0].value >= ops::CANCEL_FLOOR);
+        out.push(step_json("cancelCommit", &snap(&[]), json!({ "commit": commit_json(&c, &cu) }), json!({}), &plan, tags)?);
+    }
     Ok(out)
 }
 
