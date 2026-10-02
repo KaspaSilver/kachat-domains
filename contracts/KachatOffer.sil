@@ -34,6 +34,7 @@ contract KachatOffer(
         byte[32] name;
         byte[32] owner;
         int price;
+        int periodStart;
         int expiresAt;
     }
 
@@ -43,7 +44,8 @@ contract KachatOffer(
 
     // The name at input nameIdx (the offer sits right after it, so one name
     // input can settle at most one offer) continues to the buyer, unlisted,
-    // with its expiry unchanged (accept works whether or not it expired),
+    // with its paid period (periodStart, expiresAt) unchanged (accept works
+    // whether or not it expired),
     // and the output right after the name's continuation pays the current
     // owner at least the offer's value minus maxFee. The owner consents with
     // the name's own transfer signature (SIGHASH_ALL) in the same tx, or the
@@ -60,7 +62,7 @@ contract KachatOffer(
         int nameOut = OpAuthOutputIdx(nameIdx, 0);
         validateOutputStateWithInputTemplate(
             nameOut,
-            NameState { key: key, name: cur.name, owner: buyer, price: 0, expiresAt: cur.expiresAt },
+            NameState { key: key, name: cur.name, owner: buyer, price: 0, periodStart: cur.periodStart, expiresAt: cur.expiresAt },
             nameIdx,
             namePrefixLen,
             nameSuffixLen,

@@ -10,6 +10,7 @@
   "tCommit": 600,
   "maxYears": 2,
   "graceMs": 864000000,
+  "renewWindowMs": 864000000,
   "prices": {
     "len1": 400000000000,
     "len2": 200000000000,

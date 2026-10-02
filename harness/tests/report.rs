@@ -75,22 +75,30 @@ fn print_costs() {
     assert_eq!((r.spec.inputs.len(), r.spec.outputs.len()), (8, 8));
     println!("{}", row(&kit, "register worst case (32 chars, max years, 8 in, 8 out)", &r.spec, r.block, &["gap.register", "commit", "", "", "", "", "", ""]));
     let n = name_case(&kit, b"alice", 0);
-    let mut s8 = renew(&kit, &n, kit.params.max_years);
     let payer = keypair(3);
-    for t in 0..6u8 {
-        s8.inputs.push(Input::new(kit.p2pk_utxo(&payer, kas(1), 130 + t), Unlock::P2pk(payer)));
-    }
-    for _ in 0..6 {
-        s8.outputs.push(TransactionOutput::new(kas(1), p2pk_spk(&xonly(&payer))));
-    }
-    set_change(&mut s8, 1, kit.params.renew_price_for(5) * kit.params.max_years as u64 + NET_FEE);
-    assert_eq!((s8.inputs.len(), s8.outputs.len()), (8, 8));
-    println!("{}", row(&kit, "renew worst case (max years, 8 in, 8 out)", &s8, active_block(), &["name.renew", "", "", "", "", "", "", ""]));
+    let widen = |mut s8: TxSpec, years: i64| {
+        for t in 0..6u8 {
+            s8.inputs.push(Input::new(kit.p2pk_utxo(&payer, kas(1), 130 + t), Unlock::P2pk(payer)));
+        }
+        for _ in 0..6 {
+            s8.outputs.push(TransactionOutput::new(kas(1), p2pk_spk(&xonly(&payer))));
+        }
+        set_change(&mut s8, 1, kit.params.renew_price_for(5) * years as u64 + NET_FEE);
+        assert_eq!((s8.inputs.len(), s8.outputs.len()), (8, 8));
+        s8
+    };
+    let s8 = widen(renew(&kit, &n, kit.params.max_years), kit.params.max_years);
+    println!("{}", row(&kit, "renew worst case (max years, 8 in, 8 out)", &s8, window_block(&kit, &n), &["name.renew", "", "", "", "", "", "", ""]));
+    // extend: at most maxYears past periodStart, so 1 year from a 1-year registration
+    let s8 = widen(extend(&kit, &n, 1), 1);
+    println!("{}", row(&kit, "extend worst case (1 year, 8 in, 8 out)", &s8, active_block(), &["name.extend", "", "", "", "", "", "", ""]));
     println!("{}", row(&kit, "transfer", &transfer(&kit, &n, &xonly(&keypair(7))), active_block(), &["name.transfer", ""]));
     println!("{}", row(&kit, "list", &list(&kit, &n, 10 * SOMPI_PER_KAS as i64), active_block(), &["name.list", ""]));
     let listed = name_case(&kit, b"alice", 10 * SOMPI_PER_KAS as i64);
     println!("{}", row(&kit, "buy", &buy(&kit, &listed), active_block(), &["name.buy", ""]));
-    println!("{}", row(&kit, "renew 1 year", &renew(&kit, &n, 1), active_block(), &["name.renew", ""]));
+    println!("{}", row(&kit, "extend 1 year", &extend(&kit, &n, 1), active_block(), &["name.extend", ""]));
+    println!("{}", row(&kit, "renew 1 year (in the window)", &renew(&kit, &n, 1), window_block(&kit, &n), &["name.renew", ""]));
+    println!("{}", row(&kit, "renew 2 years (in the window)", &renew(&kit, &n, 2), window_block(&kit, &n), &["name.renew", ""]));
     let e = release(&kit, b"alice");
     println!("{}", row(&kit, "release (exit)", &e.spec, e.block, &["gap.merge", "name.release", "gap.absorbed"]));
     let e = reclaim(&kit, b"alice");

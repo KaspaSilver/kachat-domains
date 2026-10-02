@@ -72,6 +72,8 @@ pub struct NetParams {
     pub t_commit: u64,
     pub max_years: i64,
     pub grace_ms: i64,
+    /// renew is valid from expiresAt - renew_window_ms on (registry v2)
+    pub renew_window_ms: i64,
     /// sompi per year for names of 1, 2, 3, 4, 5+ bytes
     pub prices: [u64; 5],
     pub renew_prices: [u64; 5],
@@ -99,6 +101,7 @@ impl NetParams {
             t_commit: u(&v["tCommit"]),
             max_years: u(&v["maxYears"]) as i64,
             grace_ms: u(&v["graceMs"]) as i64,
+            renew_window_ms: u(&v["renewWindowMs"]) as i64,
             prices: tiers(&v["prices"]),
             renew_prices: tiers(&v["renewPrices"]),
             offer_max_fee: u(&v["offerMaxFee"]),
@@ -194,10 +197,28 @@ pub fn gap_state(lo: &[u8; 32], hi: &[u8; 32]) -> Vec<u8> {
     [&[0x20u8][..], lo, &[0x20], hi].concat()
 }
 
-/// Name state, 117 bytes: `0x20 key 0x20 name 0x20 owner 0x08 price 0x08 expiresAt`.
-pub fn name_state(key: &[u8; 32], padded_name: &[u8; 32], owner: &[u8; 32], price: i64, expires_at: i64) -> Vec<u8> {
-    [&[0x20u8][..], key, &[0x20], padded_name, &[0x20], owner, &[0x08], &num8(price), &[0x08], &num8(expires_at)].concat()
+/// Name state, 126 bytes:
+/// `0x20 key 0x20 name 0x20 owner 0x08 price 0x08 periodStart 0x08 expiresAt`.
+pub fn name_state(key: &[u8; 32], padded_name: &[u8; 32], owner: &[u8; 32], price: i64, period_start: i64, expires_at: i64) -> Vec<u8> {
+    [
+        &[0x20u8][..],
+        key,
+        &[0x20],
+        padded_name,
+        &[0x20],
+        owner,
+        &[0x08],
+        &num8(price),
+        &[0x08],
+        &num8(period_start),
+        &[0x08],
+        &num8(expires_at),
+    ]
+    .concat()
 }
+
+/// Length of the name state.
+pub const NAME_STATE_LEN: usize = 126;
 
 /// Offer state, 75 bytes: `0x20 key 0x20 buyer 0x08 refundAfter`.
 pub fn offer_state(key: &[u8; 32], buyer: &[u8; 32], refund_after: i64) -> Vec<u8> {
@@ -738,16 +759,18 @@ pub struct NameFields {
     pub name: [u8; 32],
     pub owner: [u8; 32],
     pub price: i64,
+    /// start of the current paid period, unix ms
+    pub period_start: i64,
     pub expires_at: i64,
 }
 
 impl NameFields {
-    pub fn new(name: &[u8], owner: &[u8; 32], price: i64, expires_at: i64) -> Self {
-        NameFields { key: name_key(name), name: pad_name(name), owner: *owner, price, expires_at }
+    pub fn new(name: &[u8], owner: &[u8; 32], price: i64, period_start: i64, expires_at: i64) -> Self {
+        NameFields { key: name_key(name), name: pad_name(name), owner: *owner, price, period_start, expires_at }
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        name_state(&self.key, &self.name, &self.owner, self.price, self.expires_at)
+        name_state(&self.key, &self.name, &self.owner, self.price, self.period_start, self.expires_at)
     }
 
     pub fn with_owner(&self, owner: &[u8; 32]) -> Self {
@@ -758,8 +781,23 @@ impl NameFields {
         NameFields { price, ..self.clone() }
     }
 
+    /// The expiry moves, the period start stays (what extend does).
     pub fn with_expiry(&self, expires_at: i64) -> Self {
         NameFields { expires_at, ..self.clone() }
+    }
+
+    pub fn with_period(&self, period_start: i64, expires_at: i64) -> Self {
+        NameFields { period_start, expires_at, ..self.clone() }
+    }
+
+    /// What `extend(years)` leaves: same period start, expiry + years.
+    pub fn extended(&self, years: i64) -> Self {
+        self.with_expiry(self.expires_at + years * YEAR_MS)
+    }
+
+    /// What `renew(years)` leaves: a new period from the old expiry.
+    pub fn renewed(&self, years: i64) -> Self {
+        self.with_period(self.expires_at, self.expires_at + years * YEAR_MS)
     }
 }
 

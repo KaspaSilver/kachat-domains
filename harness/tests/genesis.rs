@@ -61,9 +61,11 @@ fn artifacts_match_a_fresh_compile_of_the_sources() {
                 b(&ZERO32),
                 i(0),
                 i(0),
+                i(0),
                 i(p.bond as i64),
                 i(p.max_years),
                 i(p.grace_ms),
+                i(p.renew_window_ms),
                 i(rp[0] as i64),
                 i(rp[1] as i64),
                 i(rp[2] as i64),
@@ -111,8 +113,8 @@ fn testnet_and_mainnet_templates_are_identical() {
 fn template_state_does_not_change_the_template_hash() {
     // a state change only moves bytes inside the span: prefix and suffix stay
     let kit = Kit::new();
-    let s1 = NameFields::new(b"alice", &[7; 32], 0, 1).encode();
-    let s2 = NameFields::new(b"bobby", &[8; 32], 5, 2).encode();
+    let s1 = NameFields::new(b"alice", &[7; 32], 0, 1, 2).encode();
+    let s2 = NameFields::new(b"bobby", &[8; 32], 5, 3, 4).encode();
     let r1 = kit.name.redeem(&s1);
     let r2 = kit.name.redeem(&s2);
     let pre = kit.name.prefix.len();
@@ -136,8 +138,12 @@ fn hand_written_state_codecs_match_the_abi() {
     assert_eq!(gap, gap_state(&[1; 32], &[2; 32]));
     assert_eq!(gap.len(), 66);
 
-    for (price, exp) in [(0i64, NOW_MS), (123_456_789_000, NOW_MS + 5 * YEAR_MS), (2_900_000_000_000_000_000, 1)] {
-        let f = NameFields::new(b"alice", &[3; 32], price, exp);
+    for (price, start, exp) in [
+        (0i64, NOW_MS - YEAR_MS, NOW_MS),
+        (123_456_789_000, NOW_MS + 3 * YEAR_MS, NOW_MS + 5 * YEAR_MS),
+        (2_900_000_000_000_000_000, 0, 1),
+    ] {
+        let f = NameFields::new(b"alice", &[3; 32], price, start, exp);
         let name = abi_encode(
             &kit.name,
             BTreeMap::from([
@@ -145,15 +151,22 @@ fn hand_written_state_codecs_match_the_abi() {
                 ("name".into(), b(&f.name)),
                 ("owner".into(), b(&f.owner)),
                 ("price".into(), i(price)),
+                ("periodStart".into(), i(start)),
                 ("expiresAt".into(), i(exp)),
             ]),
         );
         assert_eq!(name, f.encode());
-        assert_eq!(name.len(), 117);
+        assert_eq!(name.len(), 126);
+        assert_eq!(name.len(), NAME_STATE_LEN);
         let c = &kit.name.abi.contracts[&kit.name.contract];
         let back = decode_runtime_state_script(&kit.name.abi, &c.runtime_state, &name).unwrap();
         assert_eq!(back["price"], i(price));
+        assert_eq!(back["periodStart"], i(start));
         assert_eq!(back["expiresAt"], i(exp));
+        // periodStart sits between price and expiresAt: 0x08 price @99, 0x08 periodStart @108, 0x08 expiresAt @117
+        assert_eq!((name[99], name[108], name[117]), (0x08, 0x08, 0x08));
+        assert_eq!(name[109..117], num8(start));
+        assert_eq!(name[118..126], num8(exp));
     }
 
     let offer = abi_encode(
@@ -167,7 +180,7 @@ fn hand_written_state_codecs_match_the_abi() {
 #[test]
 fn state_spans_are_where_the_app_splices() {
     let kit = Kit::new();
-    for (t, len) in [(&kit.name, 117), (&kit.gap, 66), (&kit.offer, 75)] {
+    for (t, len) in [(&kit.name, 126), (&kit.gap, 66), (&kit.offer, 75)] {
         let span = t.abi.contracts[&t.contract].compiled.state_span;
         assert_eq!(span.offset, 1, "{}", t.contract);
         assert_eq!(span.len, len, "{}", t.contract);
@@ -213,6 +226,7 @@ fn dispatch_tags_are_stable() {
         (&kit.name, "transfer"),
         (&kit.name, "list"),
         (&kit.name, "buy"),
+        (&kit.name, "extend"),
         (&kit.name, "renew"),
         (&kit.name, "release"),
         (&kit.name, "reclaim"),
@@ -231,6 +245,7 @@ fn dispatch_tags_are_stable() {
             "KachatName.transfer" => "transfer(byte[32],sig)",
             "KachatName.list" => "list(int,sig)",
             "KachatName.buy" => "buy(byte[32])",
+            "KachatName.extend" => "extend(int)",
             "KachatName.renew" => "renew(int)",
             "KachatName.release" => "release(sig)",
             "KachatName.reclaim" => "reclaim()",

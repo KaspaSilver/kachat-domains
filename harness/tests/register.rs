@@ -78,7 +78,7 @@ fn rejects_zero_years_and_more_than_max_years() {
         r.spec.inputs[0].args_mut()[4] = int(years);
         if years > 0 {
             // make the name output and the fee consistent with the claimed years
-            let fields = NameFields::new(b"alice", &xonly(&r.owner), 0, NOW_MS + years * YEAR_MS);
+            let fields = NameFields::new(b"alice", &xonly(&r.owner), 0, NOW_MS, NOW_MS + years * YEAR_MS);
             r.spec.outputs[2] = kit.name_output(&fields, 0);
             r.spec.inputs[2].utxo.entry.amount += kit.params.price_for(5) * years as u64;
             assert!(r.fee() as u64 >= kit.params.price_for(5) * years as u64);
@@ -88,10 +88,29 @@ fn rejects_zero_years_and_more_than_max_years() {
 }
 
 #[test]
+fn register_sets_period_start_to_now() {
+    let kit = Kit::new();
+    for years in [1, 2] {
+        let r = register(&kit, b"alice", years);
+        let f = r.name_fields();
+        assert_eq!((f.period_start, f.expires_at), (NOW_MS, NOW_MS + years * YEAR_MS));
+        let built = ok(&kit, &r.spec, r.block);
+        assert_eq!(built.tx.outputs[2].script_public_key, kit.name.spk(&f.encode()));
+    }
+    // any other periodStart is refused: an earlier one would let extend add
+    // years, a later one would shorten nothing but is still not the rule
+    for start in [NOW_MS - YEAR_MS, NOW_MS - 1, NOW_MS + 1, 0] {
+        let mut r = register(&kit, b"alice", 1);
+        r.spec.outputs[2] = kit.name_output(&NameFields { period_start: start, ..r.name_fields() }, 0);
+        gap_fails(&kit, &r);
+    }
+}
+
+#[test]
 fn rejects_an_expiry_that_does_not_match_the_years_paid() {
     let kit = Kit::new();
     let mut r = register(&kit, b"alice", 1);
-    let fields = NameFields::new(b"alice", &xonly(&r.owner), 0, NOW_MS + 2 * YEAR_MS);
+    let fields = NameFields::new(b"alice", &xonly(&r.owner), 0, NOW_MS, NOW_MS + 2 * YEAR_MS);
     r.spec.outputs[2] = kit.name_output(&fields, 0);
     gap_fails(&kit, &r);
 }
@@ -139,7 +158,7 @@ fn rejects_a_front_runner_claiming_someone_elses_commit() {
     let mut r = register(&kit, b"alice", 1);
     let attacker = xonly(&keypair(9));
     r.spec.inputs[0].args_mut()[1] = bytes(&attacker);
-    let fields = NameFields::new(b"alice", &attacker, 0, NOW_MS + YEAR_MS);
+    let fields = NameFields::new(b"alice", &attacker, 0, NOW_MS, NOW_MS + YEAR_MS);
     r.spec.outputs[2] = kit.name_output(&fields, 0);
     gap_fails(&kit, &r);
 }
@@ -248,7 +267,7 @@ fn rejects_an_absurd_now() {
     let now = 1_000_000_000_000_001i64; // above MAX_NOW
     r.spec.inputs[0].args_mut()[3] = int(now);
     r.spec.lock_time = now as u64;
-    let fields = NameFields::new(b"alice", &xonly(&r.owner), 0, now + YEAR_MS);
+    let fields = NameFields::new(b"alice", &xonly(&r.owner), 0, now, now + YEAR_MS);
     r.spec.outputs[2] = kit.name_output(&fields, 0);
     gap_fails(&kit, &r);
 }

@@ -34,6 +34,60 @@ fn accept_works_on_an_expired_name_and_keeps_its_expiry() {
 }
 
 #[test]
+fn accept_keeps_the_paid_period() {
+    // a renewed name (periodStart = its old expiry) changes hands with its
+    // period intact; a forged continuation that moves periodStart is refused
+    // by the offer (and by the name's transfer)
+    let kit = Kit::new();
+    let mut o = offer_case(&kit, b"alice", V);
+    o.n.fields = o.n.fields.renewed(1);
+    o.n.utxo = kit.name_utxo(&o.n.fields, 20);
+    let spec = accept(&kit, &o);
+    let built = ok(&kit, &spec, active_block());
+    let cont = o.n.fields.with_owner(&o.fields.buyer);
+    assert_eq!((cont.period_start, cont.expires_at), (NOW_MS + YEAR_MS, NOW_MS + 2 * YEAR_MS));
+    assert_eq!(built.tx.outputs[0].script_public_key, kit.name.spk(&cont.encode()));
+    for start in [NOW_MS, NOW_MS + YEAR_MS - 1, NOW_MS + YEAR_MS + 1, cont.expires_at] {
+        let mut spec = accept(&kit, &o);
+        spec.outputs[0] = kit.name_output(&NameFields { period_start: start, ..cont.clone() }, 0);
+        let built = kit.build(&spec);
+        let res = built.run_inputs();
+        assert!(res[0].is_err() && res[1].is_err(), "{res:?}");
+        assert!(kit.validate(&built, active_block()).is_err());
+    }
+}
+
+#[test]
+fn accept_with_a_matched_listing_refuses_a_moved_period() {
+    // a listed name matched with an offer by a third party (name.buy +
+    // offer.accept): the offer itself refuses a continuation whose
+    // periodStart moved
+    let kit = Kit::new();
+    let mut o = offer_case(&kit, b"alice", V);
+    o.n.fields = o.n.fields.with_price(V as i64 - kit.params.offer_max_fee as i64);
+    o.n.utxo = kit.name_utxo(&o.n.fields, 20);
+    let price = o.n.fields.price as u64;
+    let spec = TxSpec {
+        inputs: vec![
+            Input::contract(o.n.utxo.clone(), &kit.name, o.n.fields.encode(), "buy", vec![bytes(&o.fields.buyer)]),
+            offer_input(&kit, &o, "accept", vec![int(0)]),
+        ],
+        outputs: vec![
+            kit.name_output(&o.n.fields.with_owner(&o.fields.buyer), 0),
+            TransactionOutput::new(price, p2pk_spk(&o.n.fields.owner)),
+        ],
+        lock_time: 0,
+    };
+    ok(&kit, &spec, active_block());
+    let mut forged = spec.clone();
+    forged.outputs[0] = kit.name_output(&NameFields { period_start: NOW_MS + YEAR_MS, ..o.n.fields.with_owner(&o.fields.buyer) }, 0);
+    let built = kit.build(&forged);
+    let res = built.run_inputs();
+    assert!(res[1].is_err(), "the offer must refuse a moved periodStart: {res:?}");
+    assert!(kit.validate(&built, active_block()).is_err());
+}
+
+#[test]
 fn accept_can_take_the_network_fee_up_to_max_fee() {
     let kit = Kit::new();
     let o = offer_case(&kit, b"alice", V);
@@ -75,7 +129,7 @@ fn accept_rejects_a_different_name() {
     let kit = Kit::new();
     let mut o = offer_case(&kit, b"alice", V);
     // the offer wants "alice", the owner settles it with "bobby"
-    o.n.fields = NameFields::new(b"bobby", &o.n.fields.owner, 0, NOW_MS + YEAR_MS);
+    o.n.fields = NameFields::new(b"bobby", &o.n.fields.owner, 0, NOW_MS, NOW_MS + YEAR_MS);
     o.n.utxo = kit.name_utxo(&o.n.fields, 20);
     offer_fails(&kit, &accept(&kit, &o), active_block(), 1);
 }

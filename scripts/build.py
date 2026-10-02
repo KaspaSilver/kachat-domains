@@ -4,7 +4,7 @@
 usage: build.py <silverc> <params.json> <out_dir>
 
 Order (no template-hash cycles):
-  1. KachatName   (bakes: bond, maxYears, graceMs, renewPrices)
+  1. KachatName   (bakes: bond, maxYears, graceMs, renewWindowMs, renewPrices)
   2. KachatGap    (bakes: name template hash + layout, bond, gapValue, tCommit, maxYears, prices)
   3. KachatOffer  (bakes: registry covenant id, name template hash + layout, offerMaxFee)
      -- only once params.registryCovenantId is set (after the genesis transaction).
@@ -63,11 +63,13 @@ def main():
     pr = p['prices']
     if not 1 <= p['maxYears'] <= 31:
         sys.exit('maxYears must be 1..31 (renew adds at most maxYears * YEAR_MS < 1e12 to expiresAt)')
+    if not 0 < p['renewWindowMs'] < 31536000000:
+        sys.exit('renewWindowMs must be more than 0 and less than a year')
 
     rp = p['renewPrices']
     name = compile_contract(silverc, src('KachatName'), [
-        B(ZERO32), B(ZERO32), B(ZERO32), I(0), I(0),
-        I(p['bond']), I(p['maxYears']), I(p['graceMs']),
+        B(ZERO32), B(ZERO32), B(ZERO32), I(0), I(0), I(0),
+        I(p['bond']), I(p['maxYears']), I(p['graceMs']), I(p['renewWindowMs']),
         I(rp['len1']), I(rp['len2']), I(rp['len3']), I(rp['len4']), I(rp['len5plus']),
     ], os.path.join(out_dir, 'KachatName.json'))
     nl = layout(name)
@@ -83,7 +85,7 @@ def main():
     info = {
         'network': p['network'],
         'compiler': p['compiler'],
-        'params': {k: p[k] for k in ('bond', 'gapValue', 'tCommit', 'maxYears', 'graceMs', 'prices', 'renewPrices', 'offerMaxFee', 'genesisGap')},
+        'params': {k: p[k] for k in ('bond', 'gapValue', 'tCommit', 'maxYears', 'graceMs', 'renewWindowMs', 'prices', 'renewPrices', 'offerMaxFee', 'genesisGap')},
         'registryCovenantId': p.get('registryCovenantId'),
         'contracts': {'KachatName': nl, 'KachatGap': gl},
     }

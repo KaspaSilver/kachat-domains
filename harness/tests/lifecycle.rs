@@ -1,9 +1,13 @@
 //! One chained history through every entry, each transaction spending the
-//! real outputs of the previous ones: genesis -> register alice, bob ->
-//! list, buy, renew, transfer alice -> offer on bob, accept -> release bob ->
-//! reclaim alice -> the registry is the single genesis gap again.
+//! real outputs of the previous ones: genesis -> register alice (2 y), bob
+//! (1 y) -> list, buy alice -> extend bob to 2 y -> offer on bob, accept ->
+//! release bob -> renew alice in her window, extend her new period -> reclaim
+//! alice -> the registry is the single genesis gap again.
 
-use kachat_names_harness::{scenarios::*, *};
+use kachat_names_harness::{
+    scenarios::{self, *},
+    *,
+};
 
 fn out(built: &Built, idx: u32, daa: u64) -> Utxo {
     let o = &built.tx.outputs[idx as usize];
@@ -48,7 +52,7 @@ fn register_name(kit: &Kit, gap: &Gap, name: &[u8], owner: &secp256k1::Keypair, 
         outputs: vec![
             kit.gap_output(&gap.lo, &key, 0),
             kit.gap_output(&key, &gap.hi, 0),
-            kit.name_output(&NameFields::new(name, &ox, 0, NOW_MS + years * YEAR_MS), 0),
+            kit.name_output(&NameFields::new(name, &ox, 0, NOW_MS, NOW_MS + years * YEAR_MS), 0),
         ],
         lock_time: NOW_MS as u64,
     };
@@ -56,6 +60,21 @@ fn register_name(kit: &Kit, gap: &Gap, name: &[u8], owner: &secp256k1::Keypair, 
     spec.outputs.push(TransactionOutput::new(change, p2pk_spk(&ox)));
     let block = Block { daa: (COMMIT_DAA + p.t_commit).max(gap.utxo.entry.block_daa_score + 1), time_ms: NOW_MS as u64 + 1 };
     (ok(kit, &spec, block), block)
+}
+
+/// `payer` pays `years` of the tier price for `entry` (extend or renew) on a
+/// name: [name, payer funding] -> [continuation `next`, payer change].
+#[allow(clippy::too_many_arguments)]
+fn paid(kit: &Kit, f: &NameFields, utxo: &Utxo, entry: &str, years: i64, next: NameFields, lock_time: u64, payer: &secp256k1::Keypair, tag: u8) -> TxSpec {
+    let due = kit.params.renew_price_for(scenarios::name_len(&f.name)) * years as u64;
+    let funding = kit.p2pk_utxo(payer, due + kas(2), tag);
+    let mut spec = TxSpec {
+        inputs: vec![Input::contract(utxo.clone(), &kit.name, f.encode(), entry, vec![int(years)]), Input::new(funding, Unlock::P2pk(*payer))],
+        outputs: vec![kit.name_output(&next, 0)],
+        lock_time,
+    };
+    spec.outputs.push(TransactionOutput::new(spec.total_in() - spec.total_out() - due - NET_FEE, p2pk_spk(&xonly(payer))));
+    spec
 }
 
 #[test]
@@ -75,7 +94,7 @@ fn full_lifecycle_returns_the_registry_to_its_genesis_gap() {
     let ka = name_key(b"alice");
     let below_a = Gap { lo: ZERO32, hi: ka, utxo: out(&reg_a, 0, b0.daa) };
     let above_a = Gap { lo: ka, hi: FF32, utxo: out(&reg_a, 1, b0.daa) };
-    let mut alice = NameFields::new(b"alice", &xonly(&alice_owner), 0, NOW_MS + 2 * YEAR_MS);
+    let mut alice = NameFields::new(b"alice", &xonly(&alice_owner), 0, NOW_MS, NOW_MS + 2 * YEAR_MS);
     let mut alice_utxo = out(&reg_a, 2, b0.daa);
 
     // register bob in whichever gap holds its key
@@ -89,7 +108,7 @@ fn full_lifecycle_returns_the_registry_to_its_genesis_gap() {
     let (reg_b, b1) = register_name(&kit, &host, b"bob", &bob_owner, 1, 60);
     let gap_lo_b = Gap { lo: host.lo, hi: kb, utxo: out(&reg_b, 0, b1.daa) };
     let gap_b_hi = Gap { lo: kb, hi: host.hi, utxo: out(&reg_b, 1, b1.daa) };
-    let mut bob = NameFields::new(b"bob", &xonly(&bob_owner), 0, NOW_MS + YEAR_MS);
+    let mut bob = NameFields::new(b"bob", &xonly(&bob_owner), 0, NOW_MS, NOW_MS + YEAR_MS);
     let mut bob_utxo = out(&reg_b, 2, b1.daa);
 
     let blk = active_block();
@@ -126,24 +145,13 @@ fn full_lifecycle_returns_the_registry_to_its_genesis_gap() {
     alice = alice.with_owner(&bx);
     alice_utxo = out(&t, 0, blk.daa);
 
-    // a gifter renews alice for 2 years
-    let due = kit.params.renew_price_for(5) * 2;
-    let f = kit.p2pk_utxo(&gifter, due + kas(2), 72);
-    let mut spec = TxSpec {
-        inputs: vec![
-            Input::contract(alice_utxo.clone(), &kit.name, alice.encode(), "renew", vec![int(2)]),
-            Input::new(f, Unlock::P2pk(gifter)),
-        ],
-        outputs: vec![kit.name_output(&alice.with_expiry(alice.expires_at + 2 * YEAR_MS), 0)],
-        lock_time: 0,
-    };
-    spec.outputs.push(TransactionOutput::new(spec.total_in() - spec.total_out() - due - NET_FEE, p2pk_spk(&xonly(&gifter))));
-    let t = ok(&kit, &spec, blk);
-    alice = alice.with_expiry(alice.expires_at + 2 * YEAR_MS);
-    alice_utxo = out(&t, 0, blk.daa);
-    assert_eq!(alice.expires_at, NOW_MS + 4 * YEAR_MS);
+    // a gifter extends bob from 1 to 2 years (the most a period may hold)
+    let t = ok(&kit, &paid(&kit, &bob, &bob_utxo, "extend", 1, bob.extended(1), 0, &gifter, 72), blk);
+    bob = bob.extended(1);
+    bob_utxo = out(&t, 0, blk.daa);
+    assert_eq!((bob.period_start, bob.expires_at), (NOW_MS, NOW_MS + 2 * YEAR_MS));
 
-    // carol offers 40 KAS for bob; bob's owner accepts
+    // carol offers 40 KAS for bob; bob's owner accepts (the period travels with the name)
     let offer = OfferFields { key: kb, buyer: xonly(&carol), refund_after: OFFER_REFUND_AFTER };
     let ov = kas(40);
     let offer_utxo = kit.offer_utxo(&offer, ov, 73);
@@ -172,6 +180,27 @@ fn full_lifecycle_returns_the_registry_to_its_genesis_gap() {
     spec.outputs.push(TransactionOutput::new(spec.total_in() - spec.total_out() - NET_FEE, p2pk_spk(&xonly(&carol))));
     let t = ok(&kit, &spec, blk);
     let host_again = Gap { lo: host.lo, hi: host.hi, utxo: out(&t, 0, blk.daa) };
+
+    // alice (2 years, now the buyer's): extending is refused, she is paid 2 years ahead
+    let refused = paid(&kit, &alice, &alice_utxo, "extend", 1, alice.extended(1), 0, &gifter, 74);
+    input_fails(&kit, &refused, blk, 0);
+    // once the renewal window opens (10 days before expiry) a gifter renews her
+    // for 1 year: the new period starts at the old expiry
+    let opens = alice.expires_at - kit.params.renew_window_ms;
+    let wblk = Block { daa: blk.daa + 50_000_000, time_ms: opens as u64 + 1 };
+    let t = ok(&kit, &paid(&kit, &alice, &alice_utxo, "renew", 1, alice.renewed(1), opens as u64, &gifter, 75), wblk);
+    alice = alice.renewed(1);
+    alice_utxo = out(&t, 0, wblk.daa);
+    assert_eq!((alice.period_start, alice.expires_at), (NOW_MS + 2 * YEAR_MS, NOW_MS + 3 * YEAR_MS));
+    // a second renewal right away is refused (the window moved a year on)
+    let again = paid(&kit, &alice, &alice_utxo, "renew", 1, alice.renewed(1), opens as u64, &gifter, 76);
+    input_fails(&kit, &again, wblk, 0);
+    // but the new period can be extended to 2 years
+    let t = ok(&kit, &paid(&kit, &alice, &alice_utxo, "extend", 1, alice.extended(1), 0, &gifter, 77), wblk);
+    alice = alice.extended(1);
+    alice_utxo = out(&t, 0, wblk.daa);
+    assert_eq!((alice.period_start, alice.expires_at), (NOW_MS + 2 * YEAR_MS, NOW_MS + 4 * YEAR_MS));
+    assert_eq!(alice.owner, bx);
 
     // alice lapses; after expiresAt + grace anyone reclaims it
     let (below, above) = if kb < ka { (host_again, other_side) } else { (other_side, host_again) };

@@ -11,6 +11,7 @@
     "tCommit": 600,
     "maxYears": 2,
     "graceMs": 864000000,
+    "renewWindowMs": 864000000,
     "prices": {
       "len1": 400000000000,
       "len2": 200000000000,
@@ -34,55 +35,56 @@
   "registryCovenantId": "9444187f09a3e77450e125d448b21eb79b3c54b692a5b3f3e8af38343b9a7a51",
   "contracts": {
     "KachatName": {
-      "bytecodeLen": 2002,
+      "bytecodeLen": 3108,
       "stateSpan": {
         "offset": 1,
-        "len": 117
+        "len": 126
       },
       "prefixLen": 1,
-      "suffixLen": 1884,
-      "templateHash": "42eddf19e7ea2bc78b9aa97937f21be0505ebcf964653508f74e179dd6c7e39d",
+      "suffixLen": 2981,
+      "templateHash": "e8ded947687947b565e10cbf6e6fec60e5c90cf992c7bce2298e6dce8db29d16",
       "dispatchTags": {
         "buy": "76a02eb9",
+        "extend": "2ce7cceb",
         "list": "674a8ea4",
         "reclaim": "f56af4df",
         "release": "388ad0b4",
         "renew": "b706ac38",
         "transfer": "794dca54"
       },
-      "bytecodeSha256": "0673f76cc95af7da93232937b99e5035b68209203b860e9feeac67cf0c8643ed"
+      "bytecodeSha256": "be0e51a1a6081346603c79350543043106ed7dec987215095516736afa93d059"
     },
     "KachatGap": {
-      "bytecodeLen": 3965,
+      "bytecodeLen": 4014,
       "stateSpan": {
         "offset": 1,
         "len": 66
       },
       "prefixLen": 1,
-      "suffixLen": 3898,
-      "templateHash": "a182d59bbf460baff5ec99ca850b990d45fbafee4dfbe9a3a7a1afe21e7ba8ca",
+      "suffixLen": 3947,
+      "templateHash": "182c463cf59f6d175f75339e4efc75d2065e8e7bb8dcc515e4769d3ff805dd46",
       "dispatchTags": {
         "absorbed": "dab76355",
         "merge": "63d25bc2",
         "register": "8667af5e"
       },
-      "bytecodeSha256": "6229ca00f9f98b500637df3d6b7e69e4ee08b7965aa6fe15270ea71061b3b2b1"
+      "bytecodeSha256": "278e739bc5163b5c874dfed1905aa3ade42f1b004ecfac4a138a7d7ec93f4e52"
     },
     "KachatOffer": {
-      "bytecodeLen": 897,
+      "bytecodeLen": 948,
       "stateSpan": {
         "offset": 1,
         "len": 75
       },
       "prefixLen": 1,
-      "suffixLen": 821,
-      "templateHash": "bbfdb8000e6374c583265b70665a642c9638dd66e0097bb2441d8c6d4fefe308",
+      "suffixLen": 872,
+      "templateHash": "bff7b79aef45119fe3dededd9a524893181649d16466fa2db578c63e689ed326",
       "dispatchTags": {
         "accept": "9d4043b4",
         "refund": "777f5b11",
         "withdraw": "80344ff1"
       },
-      "bytecodeSha256": "47bc595a07035811fec0f5c2b2d802aab7eb48db21967561f699101f34fc9c3c"
+      "bytecodeSha256": "3f48d55422f251791c630b2606f656df092c684517f62c25ffbbdc080655d680"
     }
   }
 }

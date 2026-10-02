@@ -162,7 +162,7 @@ fn exit_rejects_reordered_seats() {
 fn exit_rejects_a_fourth_registry_input() {
     let kit = Kit::new();
     let mut e = release(&kit, b"alice");
-    let other = NameFields::new(b"bobby", &e.n.fields.owner, 0, NOW_MS + YEAR_MS);
+    let other = NameFields::new(b"bobby", &e.n.fields.owner, 0, NOW_MS, NOW_MS + YEAR_MS);
     e.spec.inputs.push(Input::contract(kit.name_utxo(&other, 33), &kit.name, other.encode(), "release", vec![Arg::Sig(e.n.owner)]));
     e.spec.outputs.last_mut().unwrap().value += kit.params.bond;
     fails_at(&kit, &e, 0);
@@ -270,19 +270,20 @@ fn a_name_cannot_sit_at_seat_2() {
     // Seat 2 is trusted by lineage: it carries the registry id and is not a
     // name, because a name refuses every entry at seat 2 of a 3-input exit.
     let kit = Kit::new();
-    for entry in ["release", "reclaim", "transfer", "renew"] {
+    for entry in ["release", "reclaim", "transfer", "extend", "renew"] {
         let mut e = release(&kit, b"alice");
-        let other = NameFields::new(b"bobby", &e.n.fields.owner, 0, NOW_MS - 5 * YEAR_MS);
+        let other = NameFields::new(b"bobby", &e.n.fields.owner, 0, NOW_MS - 6 * YEAR_MS, NOW_MS - 5 * YEAR_MS);
         let args = match entry {
             "release" => vec![Arg::Sig(e.n.owner)],
             "transfer" => vec![bytes(&other.owner), Arg::Sig(e.n.owner)],
-            "renew" => vec![int(1)],
+            "extend" | "renew" => vec![int(1)],
             _ => vec![],
         };
         e.spec.inputs[2] = Input::contract(kit.name_utxo(&other, 34), &kit.name, other.encode(), entry, args);
         e.spec.outputs.last_mut().unwrap().value -= kit.params.gap_value;
         e.spec.outputs.last_mut().unwrap().value += kit.params.bond;
-        if entry == "reclaim" {
+        // time locks that hold, so only the seat check can refuse
+        if entry == "reclaim" || entry == "renew" {
             e.spec.lock_time = (NOW_MS + 1) as u64;
             e.block = Block { time_ms: NOW_MS as u64 + 2, ..e.block };
         }

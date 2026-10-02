@@ -36,7 +36,7 @@ pub struct Reg {
 
 impl Reg {
     pub fn name_fields(&self) -> NameFields {
-        NameFields::new(&self.name, &xonly(&self.owner), 0, self.now + self.years * YEAR_MS)
+        NameFields::new(&self.name, &xonly(&self.owner), 0, self.now, self.now + self.years * YEAR_MS)
     }
 
     /// Value left as miner fee by the scenario (price * years + NET_FEE).
@@ -93,7 +93,7 @@ pub fn register_in(kit: &Kit, name: &[u8], years: i64, lo: &[u8; 32], hi: &[u8; 
         outputs: vec![
             kit.gap_output(lo, &key, 0),
             kit.gap_output(&key, hi, 0),
-            kit.name_output(&NameFields::new(name, &owner_x, 0, now + years * YEAR_MS), 0),
+            kit.name_output(&NameFields::new(name, &owner_x, 0, now, now + years * YEAR_MS), 0),
         ],
         lock_time: now as u64,
     };
@@ -123,11 +123,26 @@ pub struct NameCase {
     pub utxo: Utxo,
 }
 
+/// A name registered at NOW_MS for one year (periodStart = NOW_MS,
+/// expiresAt = NOW_MS + 1 year).
 pub fn name_case(kit: &Kit, name: &[u8], price: i64) -> NameCase {
     let owner = keypair(1);
-    let fields = NameFields::new(name, &xonly(&owner), price, NOW_MS + YEAR_MS);
+    let fields = NameFields::new(name, &xonly(&owner), price, NOW_MS, NOW_MS + YEAR_MS);
     let utxo = kit.name_utxo(&fields, 20);
     NameCase { fields, owner, utxo }
+}
+
+impl NameCase {
+    /// The same name with another state (a fresh UTXO for it).
+    pub fn with_fields(&self, kit: &Kit, fields: NameFields) -> NameCase {
+        let utxo = kit.name_utxo(&fields, 20);
+        NameCase { fields, owner: self.owner, utxo }
+    }
+
+    /// When renew opens: expiresAt - renewWindowMs (unix ms).
+    pub fn window_opens(&self, kit: &Kit) -> i64 {
+        self.fields.expires_at - kit.params.renew_window_ms
+    }
 }
 
 /// A block well inside the name's paid period.
@@ -189,19 +204,49 @@ pub fn buy(kit: &Kit, n: &NameCase) -> TxSpec {
     spec
 }
 
-/// Anyone (keypair 3) renews a name for `years`.
-pub fn renew(kit: &Kit, n: &NameCase, years: i64) -> TxSpec {
+/// Anyone (keypair 3) pays `years` for a name with `entry` (extend or renew),
+/// continuation `next`, lock time `lock_time`.
+fn paid_entry(kit: &Kit, n: &NameCase, entry: &str, years: i64, next: NameFields, lock_time: u64) -> TxSpec {
     let payer = keypair(3);
     let price = kit.params.renew_price_for(name_len(&n.fields.name)) * years.max(0) as u64;
     let funding = kit.p2pk_utxo(&payer, price + kas(2), 23);
     let mut spec = TxSpec {
-        inputs: vec![name_input(kit, n, "renew", vec![int(years)]), Input::new(funding, Unlock::P2pk(payer))],
-        outputs: vec![kit.name_output(&n.fields.with_expiry(n.fields.expires_at + years * YEAR_MS), 0)],
-        lock_time: 0,
+        inputs: vec![name_input(kit, n, entry, vec![int(years)]), Input::new(funding, Unlock::P2pk(payer))],
+        outputs: vec![kit.name_output(&next, 0)],
+        lock_time,
     };
     let change = spec.total_in() - spec.total_out() - price - NET_FEE;
     spec.outputs.push(TransactionOutput::new(change, p2pk_spk(&xonly(&payer))));
     spec
+}
+
+/// Anyone (keypair 3) extends the current period by `years`: no lock time;
+/// the continuation keeps periodStart, expiresAt += years.
+pub fn extend(kit: &Kit, n: &NameCase, years: i64) -> TxSpec {
+    paid_entry(kit, n, "extend", years, n.fields.extended(years), 0)
+}
+
+/// Anyone (keypair 3) renews a name for `years`, with the lock time at the
+/// opening of the renewal window (expiresAt - renewWindowMs, timestamp
+/// domain; every input sequence 0, so not final until the median time
+/// passes it): periodStart = the old expiry, expiresAt += years.
+pub fn renew(kit: &Kit, n: &NameCase, years: i64) -> TxSpec {
+    renew_at(kit, n, years, n.window_opens(kit) as u64)
+}
+
+/// [`renew`] with an explicit lock time.
+pub fn renew_at(kit: &Kit, n: &NameCase, years: i64, lock_time: u64) -> TxSpec {
+    paid_entry(kit, n, "renew", years, n.fields.renewed(years), lock_time)
+}
+
+/// A block whose past median time is `ms` + 1 (so a lock time of `ms` is final).
+pub fn block_after(ms: i64) -> Block {
+    Block { daa: COMMIT_DAA + 1_000_000, time_ms: ms as u64 + 1 }
+}
+
+/// The first block in which `renew(n)` (lock time = window opening) is final.
+pub fn window_block(kit: &Kit, n: &NameCase) -> Block {
+    block_after(n.window_opens(kit))
 }
 
 pub fn name_len(padded: &[u8; 32]) -> usize {
