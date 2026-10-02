@@ -65,7 +65,7 @@ fn assert_valid(p: &ops::Plan) {
 }
 
 fn name_rec(env: &Env, name: &str, owner: &[u8; 32], price: i64, tag: u8) -> (NameRec, Utxo) {
-    let fields = NameFields::new(name.as_bytes(), owner, price, NOW_MS + YEAR_MS);
+    let fields = NameFields::new(name.as_bytes(), owner, price, NOW_MS, NOW_MS + YEAR_MS);
     let u = reg_utxo(env, env.kit.name.spk(&fields.encode()), env.kit.params.bond, tag);
     (NameRec { outpoint: u.outpoint, fields, value: env.kit.params.bond }, u)
 }
@@ -165,10 +165,11 @@ fn name_entries_pass_the_validator() {
     let w = wallet(&env, 200, 2);
     let (n, u) = name_rec(&env, "alice", &me, 0, 30);
 
-    let p = ops::renew(&env, &w, &n, &u, 2).unwrap();
+    let p = ops::extend(&env, &w, &n, &u, 1).unwrap();
     assert_valid(&p);
-    assert_eq!(p.price_fee, 70 * SOMPI);
-    assert_eq!(p.built.tx.payload, b"kchat:1:name:renew:alice");
+    assert_eq!(p.price_fee, 35 * SOMPI);
+    assert_eq!(p.built.tx.payload, b"kchat:1:name:extend:alice");
+    assert_eq!(p.built.tx.lock_time, 0);
     let p = ops::transfer(&env, &w, &n, &u, &xonly(&keypair(9))).unwrap();
     assert_valid(&p);
     assert_eq!(p.built.tx.payload, b"kchat:1:name:transfer:alice");
@@ -192,8 +193,126 @@ fn owner_entries_refuse_names_the_deployer_does_not_own() {
     let (n, u) = name_rec(&env, "alice", &xonly(&keypair(5)), 0, 30);
     assert!(ops::transfer(&env, &w, &n, &u, &env.me()).is_err());
     assert!(ops::list(&env, &w, &n, &u, SOMPI).is_err());
-    // renew is anyone's
-    assert_valid(&ops::renew(&env, &w, &n, &u, 1).unwrap());
+    // extend and renew are anyone's (gifts)
+    assert_valid(&ops::extend(&env, &w, &n, &u, 1).unwrap());
+    let opens = n.fields.expires_at - env.kit.params.renew_window_ms;
+    let in_window = Env { block: Block { daa: env.block.daa, time_ms: opens as u64 + 60_000 }, wall_ms: opens + 300_000, ..harness_env(active_block()) };
+    assert_valid(&ops::renew(&in_window, &w, &n, &u, 1).unwrap());
+}
+
+// ---------------------------------------------------------------------------
+// extend and renew (registry v2)
+// ---------------------------------------------------------------------------
+
+/// An Env whose median time is `median` and wall clock `median + 132 s`.
+fn env_at(median: i64) -> Env {
+    Env { block: Block { daa: active_block().daa, time_ms: median as u64 }, wall_ms: median + 132_000, ..harness_env(active_block()) }
+}
+
+#[test]
+fn extend_is_capped_at_max_years_past_period_start() {
+    let env = harness_env(active_block());
+    let w = wallet(&env, 200, 2);
+    let (n, u) = name_rec(&env, "alice", &env.me(), 0, 30);
+    assert_eq!(ops::extendable_years(&env.kit.params, &n.fields), 1);
+    let p = ops::extend(&env, &w, &n, &u, 1).unwrap();
+    assert_valid(&p);
+    let next = n.fields.extended(1);
+    assert_eq!(p.built.tx.outputs[0].script_public_key, env.kit.name.spk(&next.encode()));
+    assert_eq!((next.period_start, next.expires_at), (NOW_MS, NOW_MS + 2 * YEAR_MS));
+    assert_eq!(p.built.tx.inputs[0].sequence, 0);
+    // 2 years from a 1-year registration, or anything once paid 2 years ahead: refused with the reason
+    let err = ops::extend(&env, &w, &n, &u, 2).err().unwrap().to_string();
+    assert!(err.contains("refused") && err.contains("1 y can be added now"), "{err}");
+    let two = NameRec { fields: next.clone(), ..n.clone() };
+    let u2 = reg_utxo(&env, env.kit.name.spk(&next.encode()), env.kit.params.bond, 31);
+    assert_eq!(ops::extendable_years(&env.kit.params, &next), 0);
+    let err = ops::extend(&env, &w, &two, &u2, 1).err().unwrap().to_string();
+    assert!(err.contains("0 y can be added now") && err.contains("renew opens"), "{err}");
+    assert!(ops::extend(&env, &w, &n, &u, 0).is_err());
+    assert!(ops::extend(&env, &w, &n, &u, 3).is_err());
+}
+
+#[test]
+fn renew_waits_for_its_window() {
+    let base = harness_env(active_block());
+    let w = wallet(&base, 200, 2);
+    let (n, u) = name_rec(&base, "alice", &base.me(), 0, 30);
+    let opens = ops::renew_opens(&base.kit.params, &n.fields);
+    assert_eq!(opens, n.fields.expires_at - 10 * 86_400_000);
+
+    // long before the window: built, but not final (lock time = the window
+    // opening, above the median time), with a note saying when it opens
+    let p = ops::renew(&base, &w, &n, &u, 1).unwrap();
+    assert!(!ops::renew_window_open(&base, &n.fields));
+    assert_eq!(p.built.tx.lock_time as i64, opens);
+    let e = p.validation.as_ref().unwrap_err();
+    assert!(e.contains("finalized"), "{e}");
+    assert!(p.notes.iter().any(|x| x.contains("renewal window not open")), "{:?}", p.notes);
+    // one millisecond before it opens (median time == opening): still not final
+    let p = ops::renew(&env_at(opens), &w, &n, &u, 1).unwrap();
+    assert!(p.validation.is_err());
+
+    // right after it opens: the wall clock - 3 min is still before the
+    // opening, so the lock time is the opening itself, and it is final
+    let env = env_at(opens + 1);
+    assert!(ops::renew_window_open(&env, &n.fields));
+    let p = ops::renew(&env, &w, &n, &u, 1).unwrap();
+    assert_valid(&p);
+    assert_eq!(p.built.tx.lock_time as i64, opens);
+    // a day into the window: lock time = wall clock - 3 min
+    let env = env_at(opens + 86_400_000);
+    let p = ops::renew(&env, &w, &n, &u, 2).unwrap();
+    assert_valid(&p);
+    assert_eq!(p.built.tx.lock_time as i64, ops::register_now(&env));
+    assert_eq!(p.price_fee, 70 * SOMPI);
+    assert_eq!(p.built.tx.payload, b"kchat:1:name:renew:alice");
+    // every input non-final (sequence 0), as the CLTV needs
+    assert!(p.built.tx.inputs.iter().all(|i| i.sequence == 0));
+    let next = n.fields.renewed(2);
+    assert_eq!(p.built.tx.outputs[0].script_public_key, env.kit.name.spk(&next.encode()));
+    assert_eq!((next.period_start, next.expires_at), (NOW_MS + YEAR_MS, NOW_MS + 3 * YEAR_MS));
+    // in grace and long after lapse
+    for t in [n.fields.expires_at + 1, n.fields.expires_at + env.kit.params.grace_ms + 1, n.fields.expires_at + 5 * YEAR_MS] {
+        assert_valid(&ops::renew(&env_at(t), &w, &n, &u, 1).unwrap());
+    }
+}
+
+#[test]
+fn the_decoder_follows_extend_and_renew() {
+    let env = harness_env(active_block());
+    let w = wallet(&env, 200, 2);
+    let (n, u) = name_rec(&env, "alice", &env.me(), 0, 30);
+    let mut reg = Registry::at_genesis(env.kit.registry_id, TransactionId::from_bytes([1; 32]), SOMPI, None);
+    reg.names.push(n.clone());
+    // extend: periodStart kept
+    let p = ops::extend(&env, &w, &n, &u, 1).unwrap();
+    let ev = reg.apply(&env.kit, &TxView::from(&p.built.tx)).unwrap();
+    assert!(ev[0].starts_with("extend alice by 1 y"), "{ev:?}");
+    let a = reg.name("alice").unwrap().clone();
+    assert_eq!((a.fields.period_start, a.fields.expires_at), (NOW_MS, NOW_MS + 2 * YEAR_MS));
+    assert_eq!(a.outpoint, TransactionOutpoint::new(p.txid(), 0));
+    // renew in the window: a new period from the old expiry
+    let au = Utxo::new(a.outpoint, UtxoEntry::new(SOMPI, env.kit.name.spk(&a.fields.encode()), COMMIT_DAA, false, Some(env.kit.registry_id)));
+    let later = env_at(a.fields.expires_at - 86_400_000);
+    let p = ops::renew(&later, &w, &a, &au, 1).unwrap();
+    assert_valid(&p);
+    let ev = reg.apply(&env.kit, &TxView::from(&p.built.tx)).unwrap();
+    assert!(ev[0].starts_with("renew alice by 1 y"), "{ev:?}");
+    let r = reg.name("alice").unwrap();
+    assert_eq!((r.fields.period_start, r.fields.expires_at), (NOW_MS + 2 * YEAR_MS, NOW_MS + 3 * YEAR_MS));
+    // a forged continuation that keeps the old periodStart under renew is refused
+    let mut forged = TxView::from(&p.built.tx);
+    let f = a.fields.extended(1);
+    forged.id = TransactionId::from_bytes([9; 32]);
+    forged.outputs[0] = TransactionOutput::with_covenant(SOMPI, env.kit.name.spk(&f.encode()), forged.outputs[0].covenant);
+    let mut fresh = Registry::at_genesis(env.kit.registry_id, TransactionId::from_bytes([1; 32]), SOMPI, None);
+    fresh.names.push(a.clone());
+    assert!(fresh.apply(&env.kit, &forged).is_err());
+    // the 126-byte state decodes back, periodStart included
+    let back = kachat_names_cli::registry::decode_name_state(&r.fields.encode()).unwrap();
+    assert_eq!(&back, &r.fields);
+    assert!(kachat_names_cli::registry::decode_name_state(&r.fields.encode()[..117]).is_err());
 }
 
 #[test]
@@ -316,16 +435,21 @@ fn genesis_authorizes_only_the_genesis_gap() {
 #[test]
 fn the_full_plan_runs_end_to_end_and_balances() {
     let (sim, b) = plan::simulate(templates(), PLANNED_FUNDING, NOW_MS + 10 * YEAR_MS).unwrap();
-    assert_eq!(b.prices, 175 * SOMPI);
+    // 35 + 70 + 35 (registrations) + 35 (extend alpha-tn) + 35 (renew lapse-tn)
+    assert_eq!(b.prices, 210 * SOMPI);
     assert_eq!(b.txs, plan::e2e_steps().iter().filter(|(s, _)| !matches!(s, Step::Wait(..))).count());
     let reg = sim.reg.as_ref().unwrap();
     reg.check_invariants().unwrap();
-    // left: alpha-tn (owned by the deployer, expiry 2 years out) between two gaps
+    // left: alpha-tn (owned by the deployer, extended to 2 years) between two gaps
     assert_eq!(reg.names.len(), 1);
     assert_eq!(reg.gaps.len(), 2);
     let a = reg.name(plan::A).unwrap();
     assert_eq!(a.fields.owner, xonly(&sim.deployer));
     assert_eq!(a.fields.price, 0);
+    assert_eq!(a.fields.expires_at - a.fields.period_start, 2 * YEAR_MS);
+    // lapse-tn was renewed after lapse (a new period from its old expiry) before the reclaim
+    let renew = sim.plans.iter().find(|p| p.op.starts_with("renew lapse-tn")).unwrap();
+    assert!(renew.built.tx.lock_time > 0 && renew.built.tx.payload == b"kchat:1:name:renew:lapse-tn");
     assert!(reg.offers.is_empty());
     assert!(sim.commits.iter().all(|c| c.used_by.is_some()));
     // the least funding the plan needs
@@ -360,7 +484,7 @@ fn the_decoder_refuses_unexplained_registry_outputs() {
     // replay a mutated copy: the name output now says another owner
     let mut fresh = Registry::at_genesis(reg.registry_id, sim.plans[0].txid(), SOMPI, None);
     let mut forged = TxView::from(&last);
-    let f = NameFields::new(plan::A.as_bytes(), &xonly(&keypair(9)), 0, 1);
+    let f = NameFields::new(plan::A.as_bytes(), &xonly(&keypair(9)), 0, 0, 1);
     forged.outputs[2] = TransactionOutput::with_covenant(SOMPI, kit.name.spk(&f.encode()), forged.outputs[2].covenant);
     let before = fresh.to_json();
     assert!(fresh.apply(&kit, &forged).is_err());
@@ -376,7 +500,7 @@ fn the_decoder_refuses_unexplained_registry_outputs() {
 #[test]
 fn state_round_trips_through_json() {
     let mut sim = Sim::new(templates(), PLANNED_FUNDING, NOW_MS + 10 * YEAR_MS);
-    for (step, _) in plan::e2e_steps().into_iter().take(13) {
+    for (step, _) in plan::e2e_steps().into_iter().take(14) {
         sim.run(&step).unwrap();
     }
     let reg = sim.reg.unwrap();
@@ -457,11 +581,11 @@ fn signature_scripts_are_args_then_tag_then_redeem() {
     assert_eq!(s[3].0, 0x06); // now ~1.8e12 ms: a 6-byte minimal script number
     assert_eq!(s[4], (0x51, vec![])); // years = 1: OP_1, not a data push
     assert_eq!(s[5], (0x01, kit.name.prefix.clone())); // byte[] prefix (1 byte, 0x6b)
-    assert_eq!((s[6].0, s[6].1.len()), (0x4d, 1884)); // byte[] suffix: OP_PUSHDATA2
+    assert_eq!((s[6].0, s[6].1.len()), (0x4d, 2981)); // byte[] suffix: OP_PUSHDATA2
     let mut tag = [0u8; 4];
     faster_hex::hex_decode(kit.gap.dispatch_tag("register").as_bytes(), &mut tag).unwrap();
     assert_eq!(s[7], (0x04, tag.to_vec())); // the 4-byte dispatch tag push
-    assert_eq!((s[8].0, s[8].1.len()), (0x4d, 3965)); // the gap redeem, OP_PUSHDATA2
+    assert_eq!((s[8].0, s[8].1.len()), (0x4d, 4014)); // the gap redeem, OP_PUSHDATA2
 
     // list alpha-tn 50: price (5e9 sompi: 5-byte script number), sig (65 bytes, ends 0x01), tag, redeem
     let p = find("list alpha-tn");
@@ -470,14 +594,28 @@ fn signature_scripts_are_args_then_tag_then_redeem() {
     assert_eq!(s[0].0, 0x05);
     assert_eq!((s[1].0, s[1].1.len(), *s[1].1.last().unwrap()), (0x41, 65, 0x01));
     assert_eq!(s[2].0, 0x04);
-    assert_eq!((s[3].0, s[3].1.len()), (0x4d, 2002));
+    assert_eq!((s[3].0, s[3].1.len()), (0x4d, 3108));
 
     // accept-offer: offer.accept(0): nameIdx 0 is OP_0 (an empty push)
     let p = find("accept offer");
     let s = raw_pushes(&p.built.tx.inputs[1].signature_script);
     assert_eq!(s[0], (0x00, vec![]));
     assert_eq!(s[1].0, 0x04);
-    assert_eq!((s[2].0, s[2].1.len()), (0x4d, 897)); // offer redeem
+    assert_eq!((s[2].0, s[2].1.len()), (0x4d, 948)); // offer redeem
+
+    // extend(1) / renew(1): years = OP_1, tag, name redeem
+    for (op, entry) in [("extend alpha-tn", "extend"), ("renew lapse-tn", "renew")] {
+        let p = find(op);
+        let s = raw_pushes(&p.built.tx.inputs[0].signature_script);
+        assert_eq!(s.len(), 3, "{op}");
+        assert_eq!(s[0], (0x51, vec![]));
+        let mut tag = [0u8; 4];
+        faster_hex::hex_decode(kit.name.dispatch_tag(entry).as_bytes(), &mut tag).unwrap();
+        assert_eq!(s[1], (0x04, tag.to_vec()));
+        assert_eq!((s[2].0, s[2].1.len()), (0x4d, 3108));
+    }
+    assert_eq!(kit.name.dispatch_tag("extend"), "2ce7cceb");
+    assert_eq!(kit.name.dispatch_tag("renew"), "b706ac38");
 
     // reclaim(): no args, just tag + redeem; merge/absorbed likewise
     let p = find("reclaim lapse-tn");

@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow, bail};
 use kachat_names_harness::{
-    FF32, Kit, NameFields, OfferFields, Template, TransactionOutput, YEAR_MS, ZERO32, gap_state, name_key, pad_name,
+    FF32, Kit, NAME_STATE_LEN, NameFields, OfferFields, Template, TransactionOutput, YEAR_MS, ZERO32, gap_state, name_key, pad_name,
     scenarios::name_len,
 };
 use kaspa_consensus_core::tx::{Transaction, TransactionId, TransactionOutpoint};
@@ -270,7 +270,7 @@ impl Registry {
                     let now = arg_int(&sp.args, 3)?;
                     let years = arg_int(&sp.args, 4)?;
                     let key = name_key(&name);
-                    let f = NameFields::new(&name, &owner, 0, now + years * YEAR_MS);
+                    let f = NameFields::new(&name, &owner, 0, now, now + years * YEAR_MS);
                     predicted.push((*i as u16, Predicted::Gap { lo: g.lo, hi: key }));
                     predicted.push((*i as u16, Predicted::Gap { lo: key, hi: g.hi }));
                     events.push(format!(
@@ -323,10 +323,18 @@ impl Registry {
                     events.push(format!("buy {nm} for {} by {}", crate::util::fmt_kas(f.price as u64), p2pk_address(&to)));
                     predicted.push((*i as u16, Predicted::Name(f.with_owner(&to))));
                 }
-                "renew" => {
+                "extend" => {
+                    // periodStart kept, expiresAt + years
                     let years = arg_int(&sp.args, 0)?;
-                    let nf = f.with_expiry(f.expires_at + years * YEAR_MS);
-                    events.push(format!("renew {nm} by {years} y, until {}", fmt_ms(nf.expires_at)));
+                    let nf = f.extended(years);
+                    events.push(format!("extend {nm} by {years} y, until {} (period from {})", fmt_ms(nf.expires_at), fmt_ms(nf.period_start)));
+                    predicted.push((*i as u16, Predicted::Name(nf)));
+                }
+                "renew" => {
+                    // a new period from the old expiry
+                    let years = arg_int(&sp.args, 0)?;
+                    let nf = f.renewed(years);
+                    events.push(format!("renew {nm} by {years} y, period {} .. {}", fmt_ms(nf.period_start), fmt_ms(nf.expires_at)));
                     predicted.push((*i as u16, Predicted::Name(nf)));
                 }
                 "release" => events.push(format!("release {nm}")),
@@ -415,7 +423,8 @@ impl Registry {
             })).collect::<Vec<_>>(),
             "names": self.names.iter().map(|n| json!({
                 "outpoint": fmt_outpoint(&n.outpoint), "name": n.name(), "key": hex(&n.fields.key),
-                "owner": hex(&n.fields.owner), "price": n.fields.price, "expiresAt": n.fields.expires_at, "value": n.value,
+                "owner": hex(&n.fields.owner), "price": n.fields.price, "periodStart": n.fields.period_start,
+                "expiresAt": n.fields.expires_at, "value": n.value,
             })).collect::<Vec<_>>(),
             "offers": self.offers.iter().map(|o| json!({
                 "outpoint": fmt_outpoint(&o.outpoint), "key": hex(&o.fields.key), "name": o.name,
@@ -447,6 +456,7 @@ impl Registry {
                 name: pad_name(name.as_bytes()),
                 owner: unhex32(&s(&n, "owner")?)?,
                 price: i(&n, "price")?,
+                period_start: i(&n, "periodStart").map_err(|_| anyhow!("state: {name} has no periodStart (a registry v1 state file?)"))?,
                 expires_at: i(&n, "expiresAt")?,
             };
             if fields.key != name_key(name.as_bytes()) {
@@ -531,9 +541,17 @@ pub struct Tracked {
     pub registry: bool,
 }
 
-/// Decode a name state from its 117 bytes (for display / checks).
+/// Decode a name state from its 126 bytes (for display / checks):
+/// `0x20 key 0x20 name 0x20 owner 0x08 price 0x08 periodStart 0x08 expiresAt`.
 pub fn decode_name_state(state: &[u8]) -> Result<NameFields> {
-    if state.len() != 117 || state[0] != 0x20 || state[33] != 0x20 || state[66] != 0x20 || state[99] != 0x08 || state[108] != 0x08 {
+    if state.len() != NAME_STATE_LEN
+        || state[0] != 0x20
+        || state[33] != 0x20
+        || state[66] != 0x20
+        || state[99] != 0x08
+        || state[108] != 0x08
+        || state[117] != 0x08
+    {
         bail!("not a name state");
     }
     Ok(NameFields {
@@ -541,6 +559,7 @@ pub fn decode_name_state(state: &[u8]) -> Result<NameFields> {
         name: state[34..66].try_into().unwrap(),
         owner: state[67..99].try_into().unwrap(),
         price: num8_decode(&state[100..108])?,
-        expires_at: num8_decode(&state[109..117])?,
+        period_start: num8_decode(&state[109..117])?,
+        expires_at: num8_decode(&state[118..126])?,
     })
 }

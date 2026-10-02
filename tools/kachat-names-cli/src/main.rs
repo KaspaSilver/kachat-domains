@@ -73,7 +73,13 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         backdate_days: i64,
     },
-    /// Renew a name (anyone may)
+    /// Extend a name's current period (anyone may; at most maxYears past its periodStart)
+    Extend {
+        name: String,
+        #[arg(long, default_value_t = 1)]
+        years: i64,
+    },
+    /// Renew a name: a new period from the old expiry (anyone may; once the renewal window is open)
     Renew {
         name: String,
         #[arg(long, default_value_t = 1)]
@@ -218,7 +224,13 @@ impl Live {
         }
         let pre = manifest::load(&mpath, None)?;
         let kit = self.templates.kit(pre.registry_id)?;
-        let d = manifest::load(&mpath, Some(&kit))?;
+        let d = manifest::load(&mpath, Some(&kit)).with_context(|| {
+            format!(
+                "{} does not describe the contracts in artifacts/ (the deployed registry was built from other templates, \
+                 e.g. registry v1 vs the v2 contracts here: v2 needs a new genesis)",
+                self.paths.rel(&mpath)
+            )
+        })?;
         ensure!(!d.dry_run, "{} is a dry-run manifest", self.paths.rel(&mpath));
         let reg = match Registry::load(&self.paths.state())? {
             Some(r) => {
@@ -448,10 +460,29 @@ async fn spend(l: &Live, cmd: &Cmd) -> Result<()> {
             }
             return Ok(());
         }
+        Cmd::Extend { name, years } => {
+            let n = name_rec(&reg, name)?;
+            let u = l.live_utxos(&[(n.outpoint, kit.name.spk(&n.fields.encode()))]).await?;
+            ops::extend(&env, &wallet, &n, &u[0], *years)?
+        }
         Cmd::Renew { name, years } => {
             let n = name_rec(&reg, name)?;
             let u = l.live_utxos(&[(n.outpoint, kit.name.spk(&n.fields.encode()))]).await?;
-            ops::renew(&env, &wallet, &n, &u[0], *years)?
+            let plan = ops::renew(&env, &wallet, &n, &u[0], *years)?;
+            if l.submit && !ops::renew_window_open(&env, &n.fields) {
+                println!("{}", summary::render(&plan, false));
+                let opens = ops::renew_opens(&kit.params, &n.fields);
+                bail!(
+                    "refusing to submit: the renewal window of {name} opens {} (expiresAt {} - {} days) and the network median time is {}; \
+                     a time-locked transaction is only final once the median time passes its lock time. Use `extend {name}` to add years before then ({} y possible now)",
+                    fmt_ms(opens),
+                    fmt_ms(n.fields.expires_at),
+                    kit.params.renew_window_ms / 86_400_000,
+                    fmt_ms(l.point.past_median_time as i64),
+                    ops::extendable_years(&kit.params, &n.fields)
+                );
+            }
+            plan
         }
         Cmd::Transfer { name, to } => {
             let to = parse_owner_address(to)?;
@@ -516,11 +547,23 @@ async fn spend(l: &Live, cmd: &Cmd) -> Result<()> {
 
 async fn genesis(l: &Live, assume_utxo: Option<&str>) -> Result<()> {
     let paths = &l.paths;
-    if paths.manifest().exists() {
-        bail!("{} exists: the registry is already deployed", paths.rel(&paths.manifest()));
-    }
+    // A real genesis needs a clean slate; a dry run may preview a new registry
+    // (e.g. registry v2) next to the deployed one, writing only manifests/dryrun/.
     let params_text = std::fs::read_to_string(paths.params())?;
-    ensure!(params_text.contains("\"registryCovenantId\": null"), "params already carry a registryCovenantId");
+    let deployed = paths.manifest().exists() || !params_text.contains("\"registryCovenantId\": null");
+    if deployed && l.submit {
+        bail!(
+            "{} exists or params carry a registryCovenantId: a registry is already deployed. A new genesis (registry v2) \
+             needs the old manifest archived and registryCovenantId set back to null first",
+            paths.rel(&paths.manifest())
+        );
+    }
+    if deployed {
+        println!(
+            "note: a registry is already deployed ({}); this dry run previews a NEW registry from the current contracts",
+            paths.rel(&paths.manifest())
+        );
+    }
     let mut wallet = l.wallet().await?;
     if let Some(a) = assume_utxo {
         ensure!(!l.submit, "--assume-utxo cannot be submitted");
@@ -630,11 +673,18 @@ async fn status(l: &Live, do_scan: bool) -> Result<()> {
         } else {
             "lapsed: reclaimable"
         };
+        let opens = ops::renew_opens(&kit.params, f);
+        let next = if now > opens {
+            "renewal window open".to_string()
+        } else {
+            format!("renewal opens {}, extendable by {} y", fmt_ms(opens), ops::extendable_years(&kit.params, f))
+        };
         println!(
-            "  {:<20} owner {}  {}  expires {} [{phase}]  {}  {}",
+            "  {:<20} owner {}  {}  period {} .. expires {} [{phase}; {next}]  {}  {}",
             n.name(),
             p2pk_address(&f.owner),
             if f.price > 0 { format!("listed {}", fmt_kas(f.price as u64)) } else { "unlisted".into() },
+            fmt_ms(f.period_start),
             fmt_ms(f.expires_at),
             fmt_outpoint(&n.outpoint),
             live_of(&n.outpoint, true)
@@ -703,7 +753,11 @@ fn e2e_plan(paths: &Paths, simulate: bool) -> Result<()> {
     );
     debug_assert!(b.final_balance < four);
     println!("#   reclaim: names are yearly with a 10-day grace, so a plain reclaim needs 1 year + 10 days on testnet too;");
-    println!("#   lapse-tn is registered with `now` backdated {} days so it is already past expiresAt + grace.", plan::LAPSE_BACKDATE_DAYS);
+    println!(
+        "#   lapse-tn is registered with `now` backdated {} days: renewed once after lapse (its window is long open), it is still past expiresAt + grace.",
+        plan::LAPSE_BACKDATE_DAYS
+    );
+    println!("#   renew in its window (10 days before expiry) needs a name close to expiry, so only the vectors and tests cover it.");
     println!();
     println!("kachat-names keygen                # once (done if the address above is set)");
     println!("kachat-names node-info             # read-only: network, DAA, deployer UTXOs");

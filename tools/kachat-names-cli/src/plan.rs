@@ -26,6 +26,7 @@ pub enum Step {
     /// wait this many DAA (commit maturity, offer refundAfter)
     Wait(u64, &'static str),
     Register { name: &'static str, years: i64, backdate_days: i64 },
+    Extend(&'static str, i64),
     Renew(&'static str, i64),
     /// transfer to the deployer's own address (the only key this tool holds)
     TransferToSelf(&'static str),
@@ -44,12 +45,14 @@ pub const A: &str = "alpha-tn";
 pub const B: &str = "bravo-tn";
 pub const L: &str = "lapse-tn";
 
-/// Backdating `now` by 376 days makes a 1-year name expire 11 days ago, so
+/// Backdating `now` by 741 days makes a 1-year name expire 376 days ago:
+/// its renewal window is long open, so `renew` (a new period from the old
+/// expiry, 1 year) runs at once and leaves it expired 11 days ago, so
 /// expiresAt + 10 days of grace is already past and `reclaim` is valid at
 /// once instead of a year + 10 days later. The gap only proves `now` is not
-/// in the future, so a backdated registration is valid (it pays for a year
-/// that is already over).
-pub const LAPSE_BACKDATE_DAYS: i64 = 376;
+/// in the future, so a backdated registration is valid (it pays for years
+/// that are already over).
+pub const LAPSE_BACKDATE_DAYS: i64 = 741;
 
 pub fn e2e_steps() -> Vec<(Step, &'static str)> {
     use Step::*;
@@ -61,9 +64,10 @@ pub fn e2e_steps() -> Vec<(Step, &'static str)> {
         (Wait(600, "commit maturity: tCommit = 600 DAA (~1 min)"), "consensus sequence lock on input 1"),
         (Register { name: A, years: 1, backdate_days: 0 }, "register 1 y (35 TKAS miner fee); 35 TKAS fee relays; time-locked tx (lockTime = now) is final"),
         (Register { name: B, years: 2, backdate_days: 0 }, "register 2 y (70 TKAS miner fee) in the gap the first name left"),
-        (Register { name: L, years: 1, backdate_days: LAPSE_BACKDATE_DAYS }, "backdated register: already past expiresAt + grace"),
-        (Renew(A, 1), "anyone renews: expiresAt += 1 y from the old expiry, 35 TKAS miner fee"),
-        (TransferToSelf(A), "owner-signed transfer, continuation keeps bond and expiry"),
+        (Register { name: L, years: 1, backdate_days: LAPSE_BACKDATE_DAYS }, "backdated register: lapsed a year ago"),
+        (Extend(A, 1), "anyone extends: 1 -> 2 years (the most a period holds), periodStart kept, 35 TKAS miner fee"),
+        (Renew(L, 1), "anyone renews after lapse: timestamp lock time past expiresAt - 10 d; new period from the old expiry, still lapsed"),
+        (TransferToSelf(A), "owner-signed transfer, continuation keeps bond, periodStart and expiry"),
         (List(A, 50 * SOMPI), "owner lists at 50 TKAS"),
         (Buy(A), "anyone buys: payout output right after the continuation; listing cleared"),
         (Offer(B, 10 * SOMPI, 100_000), "offer 10 TKAS on bravo-tn, refundable after ~3 h"),
@@ -87,6 +91,7 @@ pub fn command(step: &Step, me: &str) -> String {
         Step::Wait(d, why) => format!("# wait {d} DAA (~{} s): {why}", d.div_ceil(10)),
         Step::Register { name, years, backdate_days: 0 } => format!("{c} register {name} --years {years} --submit"),
         Step::Register { name, years, backdate_days } => format!("{c} register {name} --years {years} --backdate-days {backdate_days} --submit"),
+        Step::Extend(n, y) => format!("{c} extend {n} --years {y} --submit"),
         Step::Renew(n, y) => format!("{c} renew {n} --years {y} --submit"),
         Step::TransferToSelf(n) => format!("{c} transfer {n} {me} --submit"),
         Step::List(n, p) => format!("{c} list {n} {} --submit", p / SOMPI),
@@ -267,6 +272,10 @@ impl Sim {
                 let gap = reg.gap_for_key(&name_key(name.as_bytes())).ok_or_else(|| anyhow!("no gap for {name}"))?.clone();
                 let now = ops::register_now(&env) - backdate_days * 86_400_000;
                 ops::register(&env, &self.wallet, &gap, &self.live(&gap.outpoint)?, &c, &self.live(&c.outpoint.unwrap())?, *years, now)?
+            }
+            Step::Extend(n, y) => {
+                let rec = self.reg.as_ref().unwrap().name(n).ok_or_else(|| anyhow!("{n} not registered"))?.clone();
+                ops::extend(&self.env()?, &self.wallet, &rec, &self.live(&rec.outpoint)?, *y)?
             }
             Step::Renew(n, y) => {
                 let rec = self.reg.as_ref().unwrap().name(n).ok_or_else(|| anyhow!("{n} not registered"))?.clone();

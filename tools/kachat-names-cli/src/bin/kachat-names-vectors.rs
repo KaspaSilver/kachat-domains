@@ -70,16 +70,17 @@ use serde_json::{Value, json};
 const RECOMMENDED_BUDGETS: &[(&str, u16)] = &[
     ("p2pk", 10),
     ("commit", 10),
-    ("gap.register", 7),
-    ("gap.merge", 3),
+    ("gap.register", 8),
+    ("gap.merge", 4),
     ("gap.absorbed", 0),
-    ("name.transfer", 11),
-    ("name.list", 11),
-    ("name.buy", 1),
-    ("name.renew", 1),
+    ("name.transfer", 12),
+    ("name.list", 12),
+    ("name.buy", 2),
+    ("name.extend", 2),
+    ("name.renew", 2),
     ("name.release", 10),
     ("name.reclaim", 0),
-    ("offer.accept", 3),
+    ("offer.accept", 5),
     ("offer.withdraw", 10),
     ("offer.refund", 0),
 ];
@@ -118,7 +119,7 @@ fn main() -> Result<()> {
         let args = match &step {
             Step::Commit(_) => commit_args(plan),
             Step::Register { years, .. } => json!({ "years": years, "now": plan.built.tx.lock_time }),
-            Step::Renew(_, y) => json!({ "years": y }),
+            Step::Extend(_, y) | Step::Renew(_, y) => json!({ "years": y }),
             Step::TransferToSelf(_) => json!({ "newOwner": hex(&xonly(&sim.deployer)) }),
             Step::List(_, p) => json!({ "price": p }),
             Step::Offer(..) => offer_args(plan),
@@ -127,6 +128,7 @@ fn main() -> Result<()> {
         steps.push(step_json(op_name(&step), &before, records, args, plan, &tags)?);
     }
     let registry_id = sim.kit.as_ref().unwrap().registry_id;
+    let templates_params = sim.kit.as_ref().unwrap().params.clone();
 
     // ---- edge cases on the same registry ---------------------------------
     let templates = Templates::load(&paths.root);
@@ -147,6 +149,19 @@ fn main() -> Result<()> {
         "commitValue": ops::COMMIT_VALUE,
         "maxInputsFeeEntry": ops::MAX_IO_FEE_ENTRY,
         "maxInputs": ops::MAX_INPUTS,
+        "registry": "v2: name state 126 B (periodStart between price and expiresAt), entries extend + renew with a window",
+        "maxYears": templates_params.max_years,
+        "graceMs": templates_params.grace_ms,
+        "renewWindowMs": templates_params.renew_window_ms,
+        "lockTimeRules": {
+            "extend": "lockTime 0, every input sequence 0; valid any time while expiresAt + years*YEAR_MS <= periodStart + maxYears*YEAR_MS",
+            "renew": "lockTime = max(min(wallMs - 180000, blockTimeMs - 1000), expiresAt - renewWindowMs) (unix ms, timestamp domain); \
+                      every input sequence 0 (not u64::MAX: the CLTV needs a non-final input); final, so valid, only once the past \
+                      median time (blockTimeMs) is above the lock time, i.e. once the window opened; a builder refuses before",
+            "register": "lockTime = now = min(wallMs - 180000, blockTimeMs - 1000); commit input sequence = tCommit",
+            "reclaim": "lockTime = expiresAt + graceMs; every input sequence 0",
+            "refundOffer": "lockTime = refundAfter (DAA score); sequence 0",
+        },
         "recommendedBudgets": RECOMMENDED_BUDGETS.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<serde_json::Map<_, _>>(),
         "deployer": {
             "xonly": hex(&xonly(&sim.deployer)),
@@ -165,6 +180,7 @@ fn op_name(step: &Step) -> &'static str {
     match step {
         Step::Commit(_) => "commit",
         Step::Register { .. } => "register",
+        Step::Extend(..) => "extend",
         Step::Renew(..) => "renew",
         Step::TransferToSelf(_) => "transfer",
         Step::List(..) => "list",
@@ -219,6 +235,7 @@ fn name_json(n: &NameRec, u: &Utxo) -> Value {
         "key": hex(&n.fields.key),
         "owner": hex(&n.fields.owner),
         "price": n.fields.price,
+        "periodStart": n.fields.period_start,
         "expiresAt": n.fields.expires_at,
         "value": n.value,
         "utxo": utxo_json(u),
@@ -257,7 +274,7 @@ fn records_for(sim: &Sim, step: &Step) -> Result<Value> {
                 "commit": commit_json(c, &live(sim, &c.outpoint.unwrap())?),
             })
         }
-        Step::Renew(n, _) | Step::TransferToSelf(n) | Step::List(n, _) | Step::Buy(n) => {
+        Step::Extend(n, _) | Step::Renew(n, _) | Step::TransferToSelf(n) | Step::List(n, _) | Step::Buy(n) => {
             let r = reg.name(n).ok_or_else(|| anyhow!("no name"))?;
             json!({ "name": name_json(r, &live(sim, &r.outpoint)?) })
         }
@@ -312,7 +329,7 @@ fn dispatch_tags(kit: &kachat_names_harness::Kit) -> Vec<(String, String)> {
     for e in ["register", "merge", "absorbed"] {
         v.push((kit.gap.dispatch_tag(e), format!("gap.{e}")));
     }
-    for e in ["transfer", "list", "buy", "renew", "release", "reclaim"] {
+    for e in ["transfer", "list", "buy", "extend", "renew", "release", "reclaim"] {
         v.push((kit.name.dispatch_tag(e), format!("name.{e}")));
     }
     for e in ["accept", "withdraw", "refund"] {
@@ -543,7 +560,7 @@ fn extra_cases(t: &Templates, registry_id: kaspa_hashes::Hash, wall: i64, tags: 
 
     // delist (list at 0)
     {
-        let f = NameFields::new(b"listed-one", &me, 7 * SOMPI as i64, wall + YEAR_MS);
+        let f = NameFields::new(b"listed-one", &me, 7 * SOMPI as i64, wall, wall + YEAR_MS);
         let u = name_utxo(&f, 0xb1);
         let n = rec(f, &u);
         let plan = ops::list(&env, &wallet, &n, &u, 0)?;
@@ -552,7 +569,7 @@ fn extra_cases(t: &Templates, registry_id: kaspa_hashes::Hash, wall: i64, tags: 
 
     // transfer to another key
     {
-        let f = NameFields::new(b"gift", &me, 0, wall + YEAR_MS);
+        let f = NameFields::new(b"gift", &me, 0, wall, wall + YEAR_MS);
         let u = name_utxo(&f, 0xb2);
         let n = rec(f, &u);
         let plan = ops::transfer(&env, &wallet, &n, &u, &stranger)?;
@@ -561,26 +578,63 @@ fn extra_cases(t: &Templates, registry_id: kaspa_hashes::Hash, wall: i64, tags: 
 
     // buy another owner's listing (payout to them at continuation + 1)
     {
-        let f = NameFields::new(b"for-sale", &stranger, 12 * SOMPI as i64, wall + YEAR_MS);
+        let f = NameFields::new(b"for-sale", &stranger, 12 * SOMPI as i64, wall, wall + YEAR_MS);
         let u = name_utxo(&f, 0xb3);
         let n = rec(f, &u);
         let plan = ops::buy(&env, &wallet, &n, &u)?;
         out.push(step_json("buy", &snap(&wallet), json!({ "name": name_json(&n, &u) }), json!({}), &plan, tags)?);
     }
 
-    // renew a 4-character name for 2 years (500 TKAS)
+    // renew in grace: another owner's 4-character name, expired 5 days ago, for 2 years (500 TKAS)
     {
-        let f = NameFields::new(b"four", &stranger, 0, wall - 5 * 86_400_000);
+        let e = wall - 5 * 86_400_000;
+        let f = NameFields::new(b"four", &stranger, 0, e - YEAR_MS, e);
         let u = name_utxo(&f, 0xb4);
         let n = rec(f, &u);
         let w = vec![synthetic(0xe3, 0, 600 * SOMPI, p2pk_spk(&me), block.daa - 5_000, None)];
         let plan = ops::renew(&env, &w, &n, &u, 2)?;
+        ensure!(plan.built.tx.lock_time as i64 == ops::register_now(&env), "renew in grace: lock time = now - 3 min");
         out.push(step_json("renew", &snap(&w), json!({ "name": name_json(&n, &u) }), json!({ "years": 2 }), &plan, tags)?);
+    }
+
+    // renew in the window: expires in 5 days (the window opened 5 days ago), 1 year
+    {
+        let e = wall + 5 * 86_400_000;
+        let f = NameFields::new(b"in-window", &me, 0, e - YEAR_MS, e);
+        let u = name_utxo(&f, 0xba);
+        let n = rec(f, &u);
+        let plan = ops::renew(&env, &wallet, &n, &u, 1)?;
+        ensure!(plan.built.tx.lock_time as i64 == ops::register_now(&env), "renew in the window: lock time = now - 3 min");
+        out.push(step_json("renew", &snap(&wallet), json!({ "name": name_json(&n, &u) }), json!({ "years": 1 }), &plan, tags)?);
+    }
+
+    // renew right as the window opens (30 s before the median time): now - 3 min
+    // is still before the window, so the lock time is the window opening itself
+    {
+        let opens = block.time_ms as i64 - 30_000;
+        let e = opens + p.renew_window_ms;
+        let f = NameFields::new(b"just-opened", &me, 0, e - YEAR_MS, e);
+        let u = name_utxo(&f, 0xbb);
+        let n = rec(f, &u);
+        let plan = ops::renew(&env, &wallet, &n, &u, 1)?;
+        ensure!(plan.built.tx.lock_time as i64 == opens, "renew at the window opening: lock time = expiresAt - renewWindowMs");
+        out.push(step_json("renew", &snap(&wallet), json!({ "name": name_json(&n, &u) }), json!({ "years": 1 }), &plan, tags)?);
+    }
+
+    // extend another owner's 1-year name (registered 100 days ago) to 2 years (a gift)
+    {
+        let start = wall - 100 * 86_400_000;
+        let f = NameFields::new(b"gift-two", &stranger, 0, start, start + YEAR_MS);
+        let u = name_utxo(&f, 0xbc);
+        let n = rec(f, &u);
+        let plan = ops::extend(&env, &wallet, &n, &u, 1)?;
+        ensure!(plan.built.tx.lock_time == 0);
+        out.push(step_json("extend", &snap(&wallet), json!({ "name": name_json(&n, &u) }), json!({ "years": 1 }), &plan, tags)?);
     }
 
     // accept another buyer's offer
     {
-        let f = NameFields::new(b"wanted", &me, 0, wall + YEAR_MS);
+        let f = NameFields::new(b"wanted", &me, 0, wall - YEAR_MS, wall + YEAR_MS);
         let u = name_utxo(&f, 0xb5);
         let n = rec(f.clone(), &u);
         let of = OfferFields { key: f.key, buyer: stranger, refund_after: (block.daa + 50_000) as i64 };
@@ -592,7 +646,7 @@ fn extra_cases(t: &Templates, registry_id: kaspa_hashes::Hash, wall: i64, tags: 
 
     // anyone reclaims another owner's lapsed name; the caller keeps the bounty
     {
-        let f = NameFields::new(b"lapsed", &stranger, 0, wall - 30 * 86_400_000);
+        let f = NameFields::new(b"lapsed", &stranger, 0, wall - 30 * 86_400_000 - YEAR_MS, wall - 30 * 86_400_000);
         let key = f.key;
         let u = name_utxo(&f, 0xb7);
         let n = rec(f, &u);
@@ -672,13 +726,14 @@ fn codecs(t: &Templates, registry_id: kaspa_hashes::Hash) -> Result<Value> {
         pushes.push(json!({ "data": hex(&data), "push": hex(&push(&data)) }));
     }
     let gap_s = gap_state(&ZERO32, &FF32);
-    let nf = NameFields::new(b"alice", &owner, 5 * SOMPI as i64, NOW_MS + YEAR_MS);
+    let nf = NameFields::new(b"alice", &owner, 5 * SOMPI as i64, NOW_MS, NOW_MS + YEAR_MS);
     let of = OfferFields { key: name_key(b"alice"), buyer: owner, refund_after: 600_100_000 };
     let states = json!({
         "gap": { "lo": hex(&ZERO32), "hi": hex(&FF32), "state": hex(&gap_s), "spk": hex(kit.gap.spk(&gap_s).script()) },
         "name": {
-            "name": "alice", "owner": hex(&owner), "price": nf.price, "expiresAt": nf.expires_at,
-            "state": hex(&name_state(&nf.key, &nf.name, &nf.owner, nf.price, nf.expires_at)),
+            "name": "alice", "owner": hex(&owner), "price": nf.price, "periodStart": nf.period_start, "expiresAt": nf.expires_at,
+            "layout": "0x20 key 0x20 name 0x20 owner 0x08 price 0x08 periodStart 0x08 expiresAt (126 bytes)",
+            "state": hex(&name_state(&nf.key, &nf.name, &nf.owner, nf.price, nf.period_start, nf.expires_at)),
             "spk": hex(kit.name.spk(&nf.encode()).script()),
         },
         "offer": {

@@ -39,7 +39,7 @@ pub const TARGET_CHANGE: u64 = SOMPI;
 /// Relay floor at rusty-kaspa a41a333 (post-Toccata): 100 sompi per gram of
 /// max(compute, normalized transient) mass.
 pub const MIN_FEERATE: f64 = 100.0;
-/// register and renew sum at most 8 inputs and 8 outputs (bounded loops).
+/// register, extend and renew sum at most 8 inputs and 8 outputs (bounded loops).
 pub const MAX_IO_FEE_ENTRY: usize = 8;
 /// Every other operation: keep transactions small anyway.
 pub const MAX_INPUTS: usize = 24;
@@ -122,7 +122,7 @@ pub struct Plan {
     pub lock_time: u64,
     pub input_labels: Vec<String>,
     pub output_labels: Vec<String>,
-    /// price paid as miner fee (register / renew)
+    /// price paid as miner fee (register / extend / renew)
     pub price_fee: u64,
     pub network_fee: u64,
     /// local consensus validation at `block`: Ok(fee) or the rejection
@@ -514,12 +514,12 @@ pub fn register(
 
     let price = p.price_for(name.len()) * years as u64;
     let expires = now + years * YEAR_MS;
-    let fields = NameFields::new(name.as_bytes(), &me, 0, expires);
+    let fields = NameFields::new(name.as_bytes(), &me, 0, now, expires);
     let mut commit_in = Input::new(commit_utxo.clone(), Unlock::Commit { redeem, key: env.deployer });
     commit_in.sequence = p.t_commit;
     let mut notes = vec![
         format!("price {} = {} x {years} y, left as miner fee", fmt_kas(price), fmt_kas(p.price_for(name.len()))),
-        format!("now = {now} ({}), expiresAt = {expires} ({})", fmt_ms(now), fmt_ms(expires)),
+        format!("now = periodStart = {now} ({}), expiresAt = {expires} ({})", fmt_ms(now), fmt_ms(expires)),
     ];
     let mature_at = commit_utxo.entry.block_daa_score + p.t_commit;
     if env.block.daa < mature_at {
@@ -573,23 +573,117 @@ pub fn register(
 // name entries
 // ---------------------------------------------------------------------------
 
+/// The most years `extend` can add to a name now: its period (from
+/// periodStart) may hold at most maxYears.
+pub fn extendable_years(p: &NetParams, f: &NameFields) -> i64 {
+    let room = f.period_start + p.max_years * YEAR_MS - f.expires_at;
+    if room < 0 { 0 } else { (room / YEAR_MS).min(p.max_years) }
+}
+
+/// When `renew` becomes valid: expiresAt - renewWindowMs (unix ms). The
+/// transaction is final once the block's past median time passes its lock
+/// time, which must be at least this.
+pub fn renew_opens(p: &NetParams, f: &NameFields) -> i64 {
+    f.expires_at - p.renew_window_ms
+}
+
+/// The lock time of a renewal: max(registration-style now, window opening)
+/// = max(min(wall - 3 min, median time - 1 s), expiresAt - renewWindowMs).
+/// Final (and so valid) only while it is below the median time, i.e. once
+/// the window is open.
+pub fn renew_lock_time(env: &Env, f: &NameFields) -> i64 {
+    register_now(env).max(renew_opens(&env.kit.params, f))
+}
+
+/// Is the renewal window open at the validation point (median time past
+/// expiresAt - renewWindowMs)?
+pub fn renew_window_open(env: &Env, f: &NameFields) -> bool {
+    (env.block.time_ms as i64) > renew_opens(&env.kit.params, f)
+}
+
+/// Anyone extends the current period: [name.extend(years), funding] ->
+/// [continuation (periodStart kept, expiresAt + years), change]. No lock time.
+pub fn extend(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo, years: i64) -> Result<Plan> {
+    let p = &env.kit.params;
+    ensure!((1..=p.max_years).contains(&years), "years must be 1..{}", p.max_years);
+    check_live(&n.name(), utxo, p.bond, Some(env.kit.registry_id))?;
+    let name = n.name();
+    let f = &n.fields;
+    let room = extendable_years(p, f);
+    ensure!(
+        years <= room,
+        "extend {name} by {years} y refused: it is paid until {} and its period (from {}) may hold at most {} y, so {} y can be added now; \
+         renew opens on {} (expiresAt - {} days)",
+        fmt_ms(f.expires_at),
+        fmt_ms(f.period_start),
+        p.max_years,
+        room,
+        fmt_ms(renew_opens(p, f)),
+        p.renew_window_ms / 86_400_000
+    );
+    let price = p.renew_price_for(name.len()) * years as u64;
+    let nf = f.extended(years);
+    let d = Draft {
+        op: format!("extend {name} ({years} y)"),
+        inputs: vec![(name_input(env, n, utxo, "extend", vec![int(years)]), format!("name {name} extend({years})"))],
+        outputs: vec![(env.kit.name_output(&nf, 0), format!("name {name} expires {}", fmt_ms(nf.expires_at)))],
+        lock_time: 0,
+        price_fee: price,
+        notes: vec![
+            format!("extension price {} left as miner fee", fmt_kas(price)),
+            format!(
+                "expiresAt {} -> {}; periodStart {} kept (at most {} y past it)",
+                fmt_ms(f.expires_at),
+                fmt_ms(nf.expires_at),
+                fmt_ms(f.period_start),
+                p.max_years
+            ),
+        ],
+    };
+    finish(env, wallet, d, name_payload("extend", &name), Fee::Funded { max_inputs: MAX_IO_FEE_ENTRY })
+}
+
+/// Anyone renews once the renewal window opened: [name.renew(years),
+/// funding] -> [continuation (periodStart = old expiresAt, expiresAt +
+/// years), change]. Lock time = [`renew_lock_time`] (timestamp domain), every
+/// input sequence 0 (not final, as the CLTV needs). Before the window opens
+/// the plan is built but rejected (not final); the CLI refuses to submit it.
 pub fn renew(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo, years: i64) -> Result<Plan> {
     let p = &env.kit.params;
     ensure!((1..=p.max_years).contains(&years), "years must be 1..{}", p.max_years);
     check_live(&n.name(), utxo, p.bond, Some(env.kit.registry_id))?;
     let name = n.name();
+    let f = &n.fields;
+    let opens = renew_opens(p, f);
+    ensure!(opens >= 0 && opens as u64 >= LOCK_TIME_THRESHOLD, "{name}: expiresAt - renewWindowMs is not a timestamp");
+    let lock = renew_lock_time(env, f);
     let price = p.renew_price_for(name.len()) * years as u64;
-    let nf = n.fields.with_expiry(n.fields.expires_at + years * YEAR_MS);
+    let nf = f.renewed(years);
+    let mut notes = vec![
+        format!("renewal price {} left as miner fee", fmt_kas(price)),
+        format!(
+            "new period: periodStart {} -> {} (the old expiry), expiresAt -> {}",
+            fmt_ms(f.period_start),
+            fmt_ms(nf.period_start),
+            fmt_ms(nf.expires_at)
+        ),
+        format!("lock time {lock} ({}) >= window opening expiresAt - renewWindowMs = {opens} ({})", fmt_ms(lock), fmt_ms(opens)),
+    ];
+    if !renew_window_open(env, f) {
+        notes.push(format!(
+            "renewal window not open: it opens {} (the network median time {} must pass it, ~{:.1} days); use extend to add years before",
+            fmt_ms(opens),
+            fmt_ms(env.block.time_ms as i64),
+            (opens - env.block.time_ms as i64) as f64 / 86_400_000.0
+        ));
+    }
     let d = Draft {
         op: format!("renew {name} ({years} y)"),
         inputs: vec![(name_input(env, n, utxo, "renew", vec![int(years)]), format!("name {name} renew({years})"))],
         outputs: vec![(env.kit.name_output(&nf, 0), format!("name {name} expires {}", fmt_ms(nf.expires_at)))],
-        lock_time: 0,
+        lock_time: lock as u64,
         price_fee: price,
-        notes: vec![
-            format!("renewal price {} left as miner fee", fmt_kas(price)),
-            format!("expiresAt {} -> {} (from the old expiry)", fmt_ms(n.fields.expires_at), fmt_ms(nf.expires_at)),
-        ],
+        notes,
     };
     finish(env, wallet, d, name_payload("renew", &name), Fee::Funded { max_inputs: MAX_IO_FEE_ENTRY })
 }

@@ -168,12 +168,18 @@ pub fn fill_params_registry_id(paths: &Paths, id: Hash) -> Result<()> {
     Ok(())
 }
 
-/// For the dry run: a copy of params/testnet10.json with the would-be id,
-/// which `scripts/build.py` accepts to build the offer artifact.
+/// For the dry run: a copy of params/testnet10.json with the would-be id
+/// (replacing null, or the id of an already deployed registry), which
+/// `scripts/build.py` accepts to build the offer artifact.
 pub fn dryrun_params(paths: &Paths, id: Hash) -> Result<std::path::PathBuf> {
     let text = std::fs::read_to_string(paths.params())?;
     let out = paths.dryrun_dir().join(format!("params-{PARAMS_FILE}.json"));
     std::fs::create_dir_all(paths.dryrun_dir())?;
-    std::fs::write(&out, text.replace("\"registryCovenantId\": null", &format!("\"registryCovenantId\": \"{id}\"")))?;
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let at = lines.iter().position(|l| l.trim_start().starts_with("\"registryCovenantId\":")).ok_or_else(|| anyhow!("params without registryCovenantId"))?;
+    let indent: String = lines[at].chars().take_while(|c| c.is_whitespace()).collect();
+    let comma = if lines[at].trim_end().ends_with(',') { "," } else { "" };
+    lines[at] = format!("{indent}\"registryCovenantId\": \"{id}\"{comma}");
+    std::fs::write(&out, lines.join("\n") + "\n")?;
     Ok(out)
 }
