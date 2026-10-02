@@ -487,3 +487,37 @@ fn signature_scripts_are_args_then_tag_then_redeem() {
         assert_eq!(s[0].0, 0x04);
     }
 }
+
+#[test]
+fn the_manifest_carries_and_verifies_the_genesis_binding() {
+    let t = templates();
+    let paths = Paths::find(None).unwrap();
+    let d = keypair(200);
+    let w = vec![Utxo::new(
+        TransactionOutpoint::new(TransactionId::from_bytes([0x42; 32]), 0),
+        UtxoEntry::new(300 * SOMPI, p2pk_spk(&xonly(&d)), 1_000, false, None),
+    )];
+    let (p, kit) = ops::genesis(&t, d, &w, active_block(), NOW_MS, ops::MIN_FEERATE).unwrap();
+    let m = kachat_names_cli::manifest::build(&paths, &kit, &p, "kaspatest:x", None, true).unwrap();
+    let file = std::env::temp_dir().join(format!("kachat-names-manifest-{}.json", std::process::id()));
+    kachat_names_cli::manifest::write(&file, &m).unwrap();
+    let back = kachat_names_cli::manifest::load(&file, Some(&kit)).unwrap();
+    assert_eq!(back.registry_id, kit.registry_id);
+    assert_eq!(back.genesis_txid, p.txid());
+    assert!(back.dry_run);
+    for c in ["KachatGap", "KachatName", "KachatOffer"] {
+        let a = &m["artifacts"][c];
+        let pre = a["prefixHex"].as_str().unwrap();
+        let suf = a["suffixHex"].as_str().unwrap();
+        let (mut pb, mut sb) = (vec![0u8; pre.len() / 2], vec![0u8; suf.len() / 2]);
+        faster_hex::hex_decode(pre.as_bytes(), &mut pb).unwrap();
+        faster_hex::hex_decode(suf.as_bytes(), &mut sb).unwrap();
+        assert_eq!(faster_hex::hex_string(&silverscript_abi::template_hash(&pb, &sb)), a["templateHash"].as_str().unwrap(), "{c}");
+    }
+    // a manifest whose registry id does not follow from its genesis outpoint is refused
+    let mut bad = m.clone();
+    bad["genesis"]["outpoint"] = serde_json::json!(format!("{}:1", TransactionId::from_bytes([0x42; 32])));
+    kachat_names_cli::manifest::write(&file, &bad).unwrap();
+    assert!(kachat_names_cli::manifest::load(&file, Some(&kit)).is_err());
+    std::fs::remove_file(file).unwrap();
+}

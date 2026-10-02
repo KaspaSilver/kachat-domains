@@ -70,6 +70,13 @@ pub fn build(paths: &Paths, kit: &Kit, plan: &Plan, deployer: &str, scan_from: O
             "note": "compiled for registryCovenantId with the pinned compiler library; scripts/build.sh writes the same bytes once params registryCovenantId is set",
         }),
     );
+    // prefix and suffix bytes, so the manifest alone lets an indexer build
+    // and check every P2SH (KACHAT_NAMES_INDEXER.md B2)
+    for (c, t) in [("KachatGap", &kit.gap), ("KachatName", &kit.name), ("KachatOffer", &kit.offer)] {
+        let e = artifacts.get_mut(c).unwrap();
+        e["prefixHex"] = json!(hex(&t.prefix));
+        e["suffixHex"] = json!(hex(&t.suffix));
+    }
     let funding = tx.inputs[0].previous_outpoint;
     let mut p = params.clone();
     if let Some(m) = p.as_object_mut() {
@@ -140,6 +147,12 @@ pub fn load(path: &Path, kit_check: Option<&Kit>) -> Result<Deployed> {
         ensure!(v["artifacts"]["KachatGap"]["templateHash"] == hex(&kit.gap.template_hash), "manifest gap template hash differs");
         ensure!(v["artifacts"]["KachatName"]["templateHash"] == hex(&kit.name.template_hash), "manifest name template hash differs");
         ensure!(v["artifacts"]["KachatOffer"]["templateHash"] == hex(&kit.offer.template_hash), "manifest offer template hash differs");
+        for (c, t) in [("KachatGap", &kit.gap), ("KachatName", &kit.name), ("KachatOffer", &kit.offer)] {
+            ensure!(
+                v["artifacts"][c]["prefixHex"] == hex(&t.prefix) && v["artifacts"][c]["suffixHex"] == hex(&t.suffix),
+                "manifest {c} prefix/suffix differ from the templates"
+            );
+        }
     }
     Ok(d)
 }

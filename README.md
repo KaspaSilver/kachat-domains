@@ -153,7 +153,7 @@ renew 1, release 10, reclaim 0, accept 3, withdraw 10, refund 0, commit/P2PK 10.
 cd harness && cargo test           # 120 tests, ~3 s after the first build
 cargo test --test report -- --nocapture   # sizes and the cost table above
 ../scripts/mutation-check.sh       # delete each security check in turn, show which tests catch it
-cd ../tools/kachat-names-cli && cargo test   # phase-2 CLI: 24 tests (see "Testnet-10 deployment")
+cd ../tools/kachat-names-cli && cargo test   # phase-2 CLI: 25 tests (see "Testnet-10 deployment")
 ```
 
 The harness depends on the same rusty-kaspa revision silverscript v1.0.0 pins (`a41a333`) and on
@@ -275,8 +275,8 @@ kachat-names genesis --submit             # the real one
 The genesis spends one deployer UTXO; output 0 is the lone gap `(00..00, ff..ff)` bound to
 `covenant_id(that outpoint, [(0, gap)])`, output 1 is change, nothing else is authorized
 (exactly `genesis_spec`, the shape the harness's genesis tests use). With `--submit` it writes
-`manifests/kachat-names-testnet-10.json` (params, compiler, artifacts with template hashes and
-file hashes, the offer's template hash for this registry id, the genesis outpoint, txid and
+`manifests/kachat-names-testnet-10.json` (params, compiler, every contract's template hash,
+prefix and suffix bytes, dispatch tags and artifact file hashes, the offer's for this registry id, the genesis outpoint, txid and
 authorized output, `registryCovenantId`, the scan checkpoint), fills `registryCovenantId` in
 `params/testnet10.json` (the only edit to params, by a real genesis only), and initializes the
 state. Then build the offer artifact and commit:
@@ -288,7 +288,7 @@ git add params/testnet10.json artifacts/testnet10 manifests/kachat-names-testnet
 
 Every later command verifies the manifest before trusting it: the registry id must equal
 `covenant_id(genesis outpoint, [genesis gap])` recomputed from the templates, and the gap, name
-and offer template hashes must match; if `artifacts/testnet10/KachatOffer.json` exists it must be
+and offer template hashes, prefixes and suffixes must match; if `artifacts/testnet10/KachatOffer.json` exists it must be
 byte-identical to the in-process compile for that id. The dry run writes the would-be manifest
 and `params-testnet10.json` to `manifests/dryrun/` (gitignored) and, when the pinned `silverc` is
 present (`$SILVERSCRIPT_DIR`, default `~/silverscript`), runs
@@ -361,7 +361,7 @@ that is already over.
 
 ```bash
 cd tools/kachat-names-cli
-cargo test                                   # 24 tests: builders (17), rpc_paths (2), keys (2), util (3)
+cargo test                                   # 25 tests: builders (18), rpc_paths (2), keys (2), util (3)
 cargo test --test live_readonly -- --ignored --nocapture   # read-only, a real testnet-10 node
 ```
 
