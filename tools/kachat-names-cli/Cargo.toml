@@ -1,0 +1,36 @@
+[package]
+name = "kachat-names-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94.0"
+license = "ISC"
+publish = false
+description = "Phase 2: testnet-10 deployment CLI for the .kachat name covenants (dry run by default; --submit to broadcast)"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "kachat-names"
+path = "src/main.rs"
+
+# Same rusty-kaspa revision as the harness (and silverscript v1.0.0): a41a333.
+[dependencies]
+kachat-names-harness = { path = "../../harness" }
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-hashes = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-grpc-client = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+silverscript-abi = { git = "https://github.com/kaspanet/silverscript", rev = "3ed973335b59269293564805cc2c58a14595ec03" }
+anyhow = "1"
+blake3 = "1.8.5"
+clap = { version = "4", features = ["derive"] }
+faster-hex = "0.10"
+rand = "0.8.5"
+secp256k1 = { version = "0.29.0", features = ["global-context", "rand-std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
