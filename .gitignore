@@ -1,1 +1,8 @@
 harness/target/
+tools/kachat-names-cli/target/
+# Deployer key and salted commits (never committed)
+.secrets/
+# Dry-run manifests and offer builds (scratch)
+manifests/dryrun/
+# Local registry state cache (rebuilt from the chain with `scan`)
+state/
