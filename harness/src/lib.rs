@@ -15,11 +15,14 @@
 
 pub mod scenarios;
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 pub use kaspa_consensus_core::Hash;
 use kaspa_consensus_core::{
-    config::params::{ForkActivation, MAINNET_PARAMS},
+    config::params::{ForkActivation, MAINNET_PARAMS, Params},
     constants::LOCK_TIME_THRESHOLD,
     hashing::{
         covenant_id::covenant_id,
@@ -54,6 +57,9 @@ pub const MIN_RELAY_FEE_SOMPI_PER_KG: u64 = 100_000;
 // Params and templates
 // ---------------------------------------------------------------------------
 
+/// The repository root this crate was built in (the harness's parent
+/// directory). Tools that run from elsewhere pass their own root to the
+/// `*_in` loaders instead.
 pub fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
 }
@@ -79,7 +85,11 @@ fn tiers(p: &serde_json::Value) -> [u64; 5] {
 
 impl NetParams {
     pub fn load(file: &str) -> Self {
-        let path = repo_root().join("params").join(format!("{file}.json"));
+        Self::load_in(&repo_root(), file)
+    }
+
+    pub fn load_in(root: &Path, file: &str) -> Self {
+        let path = root.join("params").join(format!("{file}.json"));
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let u = |x: &serde_json::Value| x.as_u64().unwrap();
         NetParams {
@@ -130,7 +140,11 @@ impl Template {
     }
 
     pub fn load(network_dir: &str, contract: &str) -> Self {
-        let path = repo_root().join("artifacts").join(network_dir).join(format!("{contract}.json"));
+        Self::load_in(&repo_root(), network_dir, contract)
+    }
+
+    pub fn load_in(root: &Path, network_dir: &str, contract: &str) -> Self {
+        let path = root.join("artifacts").join(network_dir).join(format!("{contract}.json"));
         let abi: SilAbiArtifact = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         abi.check_consistency().expect("artifact consistency");
         Self::from_artifact(abi)
@@ -246,6 +260,8 @@ pub struct Kit {
     pub offer: Arc<Template>,
     pub registry_id: Hash,
     pub genesis_tx: Built,
+    /// consensus params the validator and the mass/fee figures use
+    pub consensus: Params,
     validator: TransactionValidator,
     mass_calculator: MassCalculator,
 }
@@ -261,9 +277,10 @@ impl Kit {
     }
 
     pub fn for_network(params_file: &str) -> Self {
-        let params = NetParams::load(params_file);
-        let name = Arc::new(Template::load(params_file, "KachatName"));
-        let gap = Arc::new(Template::load(params_file, "KachatGap"));
+        let root = repo_root();
+        let params = NetParams::load_in(&root, params_file);
+        let name = Arc::new(Template::load_in(&root, params_file, "KachatName"));
+        let gap = Arc::new(Template::load_in(&root, params_file, "KachatGap"));
 
         // Genesis: one ordinary UTXO creates the lone genesis gap (00..00, ff..ff),
         // the only output of its covenant group.
@@ -272,10 +289,22 @@ impl Kit {
             TransactionOutpoint::new(TransactionId::from_bytes([0x42; 32]), 0),
             UtxoEntry::new(10 * SOMPI_PER_KAS, p2pk_spk(&xonly(&deployer)), 1_000, false, None),
         );
-        let gap_out = TransactionOutput::new(params.gap_value, gap.spk(&gap_state(&ZERO32, &FF32)));
-        let registry_id = covenant_id(genesis_funding.outpoint, [(0u32, &gap_out)].into_iter());
+        let change = TransactionOutput::new(10 * SOMPI_PER_KAS - params.gap_value - 500_000, p2pk_spk(&xonly(&deployer)));
+        let (spec, registry_id) = genesis_spec(&params, &gap, genesis_funding, deployer, vec![change]);
+        let offer = Arc::new(compile_offer_in(&root, &params, &name, registry_id));
+        let mut kit = Self::assemble_kit(params, name, gap, offer, registry_id, MAINNET_PARAMS);
+        kit.genesis_tx = kit.build(&spec);
+        kit
+    }
 
-        let p = MAINNET_PARAMS;
+    /// A kit for an existing registry (`registry_id` from a real or a
+    /// would-be genesis), validating under `consensus` params. `offer` is the
+    /// KachatOffer compiled for that id. `genesis_tx` is left empty.
+    pub fn with_registry(params: NetParams, name: Template, gap: Template, offer: Template, registry_id: Hash, consensus: Params) -> Self {
+        Self::assemble_kit(params, Arc::new(name), Arc::new(gap), Arc::new(offer), registry_id, consensus)
+    }
+
+    fn assemble_kit(params: NetParams, name: Arc<Template>, gap: Arc<Template>, offer: Arc<Template>, registry_id: Hash, p: Params) -> Self {
         let mass_calculator = MassCalculator::new_with_consensus_params(&p);
         let validator = TransactionValidator::new(
             p.max_tx_inputs,
@@ -290,25 +319,17 @@ impl Kit {
             ForkActivation::always(),
             p.mass_per_sig_op,
         );
-
-        let offer = Arc::new(compile_offer(&params, &name, registry_id));
-
-        let mut kit = Kit {
+        Kit {
             params,
             name,
             gap,
             offer,
             registry_id,
             genesis_tx: Built { tx: Transaction::new(1, vec![], vec![], 0, SUBNETWORK_ID_NATIVE, 0, vec![]), entries: vec![], budgets: vec![], used_units: vec![] },
+            consensus: p,
             validator,
             mass_calculator,
-        };
-        let mut out = gap_out;
-        out.covenant = Some(CovenantBinding { authorizing_input: 0, covenant_id: registry_id });
-        let change = TransactionOutput::new(10 * SOMPI_PER_KAS - kit.params.gap_value - 500_000, p2pk_spk(&xonly(&deployer)));
-        let spec = TxSpec { inputs: vec![Input::new(genesis_funding, Unlock::P2pk(deployer))], outputs: vec![out, change], lock_time: 0 };
-        kit.genesis_tx = kit.build(&spec);
-        kit
+        }
     }
 
     pub fn registry_utxo(&self, spk: ScriptPublicKey, value: u64, daa: u64, tag: u8) -> Utxo {
@@ -446,7 +467,7 @@ impl Kit {
     pub fn costs(&self, built: &Built) -> Costs {
         let tx = &built.tx;
         let nc = self.mass_calculator.calc_non_contextual_masses(tx);
-        let cof = MAINNET_PARAMS.mempool_block_mass_limits().raw_post().cofactors();
+        let cof = self.consensus.mempool_block_mass_limits().raw_post().cofactors();
         let norm_transient = nc.normalized_transient(&cof);
         let fee_mass = nc.compute_mass.max(norm_transient);
         Costs {
@@ -476,10 +497,37 @@ pub struct Block {
     pub time_ms: u64,
 }
 
+/// The genesis transaction: `funding` (an ordinary P2PK UTXO of `deployer`)
+/// creates the lone genesis gap `(genesisLo, genesisHi) = (00..00, ff..ff)`
+/// at output 0, bound to `covenant_id(funding outpoint, [(0, gap)])`, plus
+/// the given unbound outputs (change). Nothing else is authorized.
+/// Returns the spec and the registry covenant id.
+pub fn genesis_spec(
+    params: &NetParams,
+    gap: &Template,
+    funding: Utxo,
+    deployer: Keypair,
+    unbound: Vec<TransactionOutput>,
+) -> (TxSpec, Hash) {
+    let gap_out = TransactionOutput::new(params.gap_value, gap.spk(&gap_state(&ZERO32, &FF32)));
+    let registry_id = covenant_id(funding.outpoint, [(0u32, &gap_out)].into_iter());
+    let mut out = gap_out;
+    out.covenant = Some(CovenantBinding { authorizing_input: 0, covenant_id: registry_id });
+    assert!(unbound.iter().all(|o| o.covenant.is_none()), "genesis authorizes only the gap");
+    let mut outputs = vec![out];
+    outputs.extend(unbound);
+    (TxSpec { inputs: vec![Input::new(funding, Unlock::P2pk(deployer))], outputs, lock_time: 0 }, registry_id)
+}
+
 /// Compile KachatOffer for `registry_id` with the pinned compiler library
 /// (the same commit scripts/build.sh uses).
 pub fn compile_offer(params: &NetParams, name: &Template, registry_id: Hash) -> Template {
-    let src = std::fs::read_to_string(repo_root().join("contracts/KachatOffer.sil")).unwrap();
+    compile_offer_in(&repo_root(), params, name, registry_id)
+}
+
+/// [`compile_offer`] reading `contracts/KachatOffer.sil` under `root`.
+pub fn compile_offer_in(root: &Path, params: &NetParams, name: &Template, registry_id: Hash) -> Template {
+    let src = std::fs::read_to_string(root.join("contracts/KachatOffer.sil")).unwrap();
     let args = vec![
         ArtifactValue::Bytes(ZERO32.to_vec()),
         ArtifactValue::Bytes(ZERO32.to_vec()),
