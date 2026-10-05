@@ -42,8 +42,8 @@ fn the_scanner_view_rebuilds_the_tracked_state() {
     let s = sim();
     let kit = s.kit.as_ref().unwrap();
     let id = kit.registry_id;
-    let genesis = &s.plans[0].built.tx;
-    let mut scanned = Registry::at_genesis(id, genesis.id(), kit.params.gap_value, None);
+    let genesis = &s.plans[1].built.tx;
+    let mut scanned = Registry::at_genesis(id, genesis.id(), kit.params.gap_value, None, kit.price_id, s.plans[0].txid(), s.genesis_shards.clone());
     for p in &s.plans {
         let mut o = RpcOptionalTransaction::from(&p.built.tx);
         o.verbose_data = Some(RpcOptionalTransactionVerboseData {
@@ -62,5 +62,9 @@ fn the_scanner_view_rebuilds_the_tracked_state() {
     assert_eq!(scanned.gaps, tracked.gaps);
     assert_eq!(scanned.names, tracked.names);
     assert_eq!(scanned.offers, tracked.offers);
+    let (mut a, mut b) = (scanned.shards.clone(), tracked.shards.clone());
+    a.sort_by_key(|x| x.shard);
+    b.sort_by_key(|x| x.shard);
+    assert_eq!(a, b);
     scanned.check_invariants().unwrap();
 }

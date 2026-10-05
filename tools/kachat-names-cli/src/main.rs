@@ -1,4 +1,5 @@
-//! `kachat-names`: testnet-10 deployment CLI for the .kachat name covenants.
+//! `kachat-names`: testnet-10 deployment CLI for the .kachat name covenants
+//! (registry v3: the price record, seller-bound offers, the short clock).
 //!
 //! Every spending command builds the exact transaction shape of the README,
 //! validates it locally with rusty-kaspa's consensus TransactionValidator and
@@ -17,9 +18,9 @@ use kachat_names_cli::{
     ops::{self, Env, ExitParts, Plan, Templates},
     paths::Paths,
     plan::{self, PLANNED_FUNDING},
-    registry::{GapRec, OfferRec, Registry, TxView},
+    registry::{GapRec, OfferRec, PriceRec, Registry, TxView},
     scan, summary,
-    util::{SOMPI, fmt_kas, fmt_ms, fmt_outpoint, hex, now_ms, parse_kas, parse_outpoint},
+    util::{SOMPI, fmt_dur, fmt_kas, fmt_ms, fmt_outpoint, hex, now_ms, parse_kas, parse_outpoint},
 };
 use kachat_names_harness::{
     Block, Kit, TransactionId, TransactionOutpoint, Utxo, UtxoEntry, commit_redeem, commitment, gap_state, name_key, p2pk_spk, xonly,
@@ -52,16 +53,36 @@ enum Cmd {
     Keygen,
     /// Print the deployer's kaspatest: address
     Address,
+    /// Create the testnet price authority key (.secrets/testnet10-authority.key, mode 600). Mainnet: KasSigner
+    AuthorityKeygen,
     /// Connectivity report: GetInfo, network, DAG point, and the deployer's UTXOs (read-only)
     NodeInfo,
     /// UTXOs of the deployer address
     Balance,
-    /// Mint the registry: one deployer UTXO -> the lone genesis gap (+ change)
+    /// Mint the price record (registry v3, first): one deployer UTXO -> the K shards (+ change)
+    PriceGenesis {
+        /// dry run only: pretend the deployer holds one UTXO of this many TKAS (cannot be submitted)
+        #[arg(long)]
+        assume_utxo: Option<String>,
+    },
+    /// Mint the registry (after the price genesis): one deployer UTXO -> the lone genesis gap (+ change).
+    /// Without a price genesis yet, the dry run previews both
     Genesis {
         /// dry run only: pretend the deployer holds one UTXO of this many TKAS (cannot be submitted)
         #[arg(long)]
         assume_utxo: Option<String>,
     },
+    /// Show the current prices (every shard)
+    Prices,
+    /// Set every price at once, signed by the authority key (instant, up or down).
+    /// Either five prices in TKAS (1/2/3/4/5+ chars) or --times N/D of the genesis prices
+    SetPrices {
+        prices: Vec<String>,
+        #[arg(long)]
+        times: Option<String>,
+    },
+    /// Move the price authority to another key (a kaspatest: Schnorr address), signed by the current one
+    SetAuthority { to: String },
     /// Salted commit for a name (salt kept in .secrets/commits.json)
     Commit { name: String },
     /// Register a committed name
@@ -69,9 +90,10 @@ enum Cmd {
         name: String,
         #[arg(long, default_value_t = 1)]
         years: i64,
-        /// move `now` this many days into the past (testing reclaim: 376 makes a 1-year name lapsed at once)
+        /// move `now` this many minutes into the past (testing reclaim on the 10-minute clock:
+        /// 45 leaves a 1-period name lapsed even after one renewal)
         #[arg(long, default_value_t = 0)]
-        backdate_days: i64,
+        backdate_minutes: i64,
     },
     /// Extend a name's current period (anyone may; at most maxYears past its periodStart)
     Extend {
@@ -91,7 +113,7 @@ enum Cmd {
     List { name: String, price: String },
     /// Buy a listed name for the deployer
     Buy { name: String },
-    /// Lock TKAS as an offer for a name
+    /// Lock TKAS as an offer for a registered name (bound to its current owner)
     Offer {
         name: String,
         amount: String,
@@ -101,6 +123,12 @@ enum Cmd {
     },
     /// Accept an offer on a name the deployer owns
     AcceptOffer {
+        name: String,
+        #[arg(long)]
+        offer: Option<String>,
+    },
+    /// Decline an offer made to the deployer (it goes straight back to the buyer)
+    DeclineOffer {
         name: String,
         #[arg(long)]
         offer: Option<String>,
@@ -163,6 +191,14 @@ async fn run(cli: Cli, paths: Paths) -> Result<()> {
             println!("{}", keys::address_of(&keys::load(&paths)?));
             Ok(())
         }
+        Cmd::AuthorityKeygen => {
+            ensure!(!cli.submit, "authority-keygen sends nothing");
+            let kp = keys::authority_keygen(&paths)?;
+            println!("created {} (mode 600)", paths.rel(&paths.authority_key()));
+            println!("price authority address: {}", keys::address_of(&kp));
+            println!("testnet only: the mainnet authority is generated and kept on KasSigner, never on a networked machine");
+            Ok(())
+        }
         Cmd::E2ePlan { simulate } => e2e_plan(&paths, *simulate),
         _ => live(cli, paths).await,
     }
@@ -223,21 +259,21 @@ impl Live {
             );
         }
         let pre = manifest::load(&mpath, None)?;
-        let kit = self.templates.kit(pre.registry_id)?;
+        let kit = self.templates.kit(pre.price_id, pre.registry_id)?;
         let d = manifest::load(&mpath, Some(&kit)).with_context(|| {
             format!(
-                "{} does not describe the contracts in artifacts/ (the deployed registry was built from other templates, \
-                 e.g. registry v1 vs the v2 contracts here: v2 needs a new genesis)",
+                "{} does not describe the contracts in contracts/ and artifacts/ (the deployed registry was built from other \
+                 templates: a new registry version needs new geneses)",
                 self.paths.rel(&mpath)
             )
         })?;
         ensure!(!d.dry_run, "{} is a dry-run manifest", self.paths.rel(&mpath));
         let reg = match Registry::load(&self.paths.state())? {
             Some(r) => {
-                ensure!(r.registry_id == d.registry_id, "state file is for another registry");
+                ensure!(r.registry_id == d.registry_id && r.price_id == d.price_id, "state file is for another registry");
                 r
             }
-            None => Registry::at_genesis(d.registry_id, d.genesis_txid, kit.params.gap_value, d.scan_from),
+            None => d.genesis_registry(kit.params.gap_value),
         };
         Ok((d, kit, reg))
     }
@@ -293,6 +329,33 @@ impl Live {
         println!("not accepted within 60 s; check `status` / `balance` before the next command");
     }
 
+    /// A live price shard for a register / extend / renew: the shards in a random
+    /// order, the first one whose tracked UTXO is live (another reader may hold the rest).
+    async fn pick_shard(&self, kit: &Kit, reg: &Registry) -> Result<(PriceRec, Utxo)> {
+        let mut shards = reg.shards.clone();
+        ensure!(!shards.is_empty(), "no price shards are tracked; run `scan`");
+        let start = secp256k1::rand::RngCore::next_u32(&mut secp256k1::rand::rngs::OsRng) as usize % shards.len();
+        shards.rotate_left(start);
+        let wanted: Vec<_> = shards.iter().map(|s| (s.outpoint, kit.price.spk(&s.state()))).collect();
+        let addrs: Vec<_> = wanted.iter().map(|(_, spk)| spk_address(spk)).collect::<Result<_>>()?;
+        let found = self.node.utxos(&addrs).await?;
+        for s in shards {
+            if let Some((_, o, e)) = found.iter().find(|(_, o, _)| *o == s.outpoint) {
+                return Ok((s, Utxo::new(*o, e.clone())));
+            }
+        }
+        bail!("no price shard is live right now (all in use, or the local state is stale: run `scan`)")
+    }
+
+    /// Every shard, live, for a price change.
+    async fn all_shards(&self, kit: &Kit, reg: &Registry) -> Result<Vec<(PriceRec, Utxo)>> {
+        let mut shards = reg.shards.clone();
+        shards.sort_by_key(|s| s.shard);
+        let wanted: Vec<_> = shards.iter().map(|s| (s.outpoint, kit.price.spk(&s.state()))).collect();
+        let lives = self.live_utxos(&wanted).await?;
+        Ok(shards.into_iter().zip(lives).collect())
+    }
+
     fn save_after(&self, kit: &Kit, reg: &mut Registry, plan: &Plan) -> Result<()> {
         let events = reg.apply(kit, &TxView::from(&plan.built.tx))?;
         if let Some(o) = &plan.new_offer {
@@ -310,7 +373,7 @@ impl Live {
 async fn live(cli: Cli, paths: Paths) -> Result<()> {
     let deployer = keys::load(&paths)?;
     if cli.submit
-        && let Cmd::Genesis { assume_utxo: Some(_) } = &cli.cmd
+        && let Cmd::Genesis { assume_utxo: Some(_) } | Cmd::PriceGenesis { assume_utxo: Some(_) } = &cli.cmd
     {
         bail!("--assume-utxo is a dry-run aid; it cannot be submitted");
     }
@@ -383,11 +446,27 @@ async fn command(l: &Live, cmd: &Cmd) -> Result<()> {
             println!("total {} in {} UTXO(s)", fmt_kas(w.iter().map(|u| u.entry.amount).sum()), w.len());
             Ok(())
         }
+        Cmd::PriceGenesis { assume_utxo } => price_genesis(l, assume_utxo.as_deref()).await,
         Cmd::Genesis { assume_utxo } => genesis(l, assume_utxo.as_deref()).await,
+        Cmd::Prices => {
+            ensure!(!l.submit, "prices sends nothing");
+            let (_, _, reg) = l.registry()?;
+            let mut shards = reg.shards.clone();
+            shards.sort_by_key(|s| s.shard);
+            let cur = shards.first().ok_or_else(|| anyhow!("no shards tracked; run `scan`"))?;
+            println!("price authority {}", p2pk_address(&cur.authority));
+            println!("price per period ({}), 1 / 2 / 3 / 4 / 5+ chars:", fmt_dur(l.templates.params.period_ms));
+            println!("  {}", cur.prices.iter().map(|p| fmt_kas(*p)).collect::<Vec<_>>().join(" / "));
+            for s in &shards {
+                let agree = s.prices == cur.prices && s.authority == cur.authority;
+                println!("  shard {} {}  {}", s.shard, fmt_outpoint(&s.outpoint), if agree { "" } else { "DISAGREES (run `scan`)" });
+            }
+            Ok(())
+        }
         Cmd::Scan { from_genesis, min_confirmations } => {
             let (d, kit, mut reg) = l.registry()?;
             if *from_genesis {
-                reg = Registry::at_genesis(d.registry_id, d.genesis_txid, kit.params.gap_value, d.scan_from);
+                reg = d.genesis_registry(kit.params.gap_value);
             }
             let rep = scan::scan(&l.node, &kit, &mut reg, *min_confirmations, 10_000, true).await?;
             reg.check_invariants()?;
@@ -411,7 +490,7 @@ async fn command(l: &Live, cmd: &Cmd) -> Result<()> {
 
 async fn spend(l: &Live, cmd: &Cmd) -> Result<()> {
     let (_, kit, mut reg) = l.registry()?;
-    let env = l.env(l.templates.kit(kit.registry_id)?);
+    let env = l.env(l.templates.kit(kit.price_id, kit.registry_id)?);
     let wallet = l.wallet().await?;
     let me = l.me();
     let name_rec = |reg: &Registry, n: &str| {
@@ -434,9 +513,9 @@ async fn spend(l: &Live, cmd: &Cmd) -> Result<()> {
             }
             return Ok(());
         }
-        Cmd::Register { name, years, backdate_days } => {
+        Cmd::Register { name, years, backdate_minutes } => {
             ops::check_name(name)?;
-            ensure!(*backdate_days >= 0, "--backdate-days must be >= 0");
+            ensure!(*backdate_minutes >= 0, "--backdate-minutes must be >= 0");
             let mut all = commits::load(&l.paths)?;
             let c: CommitRec =
                 commits::find_open(&all, name, &me).cloned().ok_or_else(|| anyhow!("no open commit for {name}; run `commit {name}` first"))?;
@@ -447,8 +526,9 @@ async fn spend(l: &Live, cmd: &Cmd) -> Result<()> {
             let redeem = commit_redeem(&commitment(name.as_bytes(), &me, &c.salt), &me);
             let lives =
                 l.live_utxos(&[(gap.outpoint, gap_spk(&kit, &gap)), (c.outpoint.unwrap(), pay_to_script_hash_script(&redeem))]).await?;
-            let now = ops::register_now(&env) - backdate_days * 86_400_000;
-            let plan = ops::register(&env, &wallet, &gap, &lives[0], &c, &lives[1], *years, now)?;
+            let now = ops::register_now(&env) - backdate_minutes * 60_000;
+            let (shard, shard_utxo) = l.pick_shard(&kit, &reg).await?;
+            let plan = ops::register(&env, &wallet, &gap, &lives[0], &c, &lives[1], &shard, &shard_utxo, *years, now)?;
             if l.finish(&plan).await? {
                 l.save_after(&kit, &mut reg, &plan)?;
                 for x in all.iter_mut() {
@@ -463,21 +543,23 @@ async fn spend(l: &Live, cmd: &Cmd) -> Result<()> {
         Cmd::Extend { name, years } => {
             let n = name_rec(&reg, name)?;
             let u = l.live_utxos(&[(n.outpoint, kit.name.spk(&n.fields.encode()))]).await?;
-            ops::extend(&env, &wallet, &n, &u[0], *years)?
+            let (shard, shard_utxo) = l.pick_shard(&kit, &reg).await?;
+            ops::extend(&env, &wallet, &n, &u[0], &shard, &shard_utxo, *years)?
         }
         Cmd::Renew { name, years } => {
             let n = name_rec(&reg, name)?;
             let u = l.live_utxos(&[(n.outpoint, kit.name.spk(&n.fields.encode()))]).await?;
-            let plan = ops::renew(&env, &wallet, &n, &u[0], *years)?;
+            let (shard, shard_utxo) = l.pick_shard(&kit, &reg).await?;
+            let plan = ops::renew(&env, &wallet, &n, &u[0], &shard, &shard_utxo, *years)?;
             if l.submit && !ops::renew_window_open(&env, &n.fields) {
                 println!("{}", summary::render(&plan, false));
                 let opens = ops::renew_opens(&kit.params, &n.fields);
                 bail!(
-                    "refusing to submit: the renewal window of {name} opens {} (expiresAt {} - {} days) and the network median time is {}; \
-                     a time-locked transaction is only final once the median time passes its lock time. Use `extend {name}` to add years before then ({} y possible now)",
+                    "refusing to submit: the renewal window of {name} opens {} (expiresAt {} - {}) and the network median time is {}; \
+                     a time-locked transaction is only final once the median time passes its lock time. Use `extend {name}` to add periods before then ({} possible now)",
                     fmt_ms(opens),
                     fmt_ms(n.fields.expires_at),
-                    kit.params.renew_window_ms / 86_400_000,
+                    fmt_dur(kit.params.renew_window_ms),
                     fmt_ms(l.point.past_median_time as i64),
                     ops::extendable_years(&kit.params, &n.fields)
                 );
@@ -505,10 +587,42 @@ async fn spend(l: &Live, cmd: &Cmd) -> Result<()> {
                 Some(rel) => l.point.virtual_daa + rel.parse::<u64>().context("--refund-after +N")?,
                 None => refund_after.parse::<u64>().context("--refund-after <daa>")?,
             };
-            let target = reg.name(name).cloned();
-            ops::offer(&env, &wallet, name, parse_kas(amount)?, ra, target.as_ref())?
+            let target = name_rec(&reg, name).context("offers are made on registered names (registry v3: to their owner)")?;
+            ops::offer(&env, &wallet, name, parse_kas(amount)?, ra, &target)?
         }
-        Cmd::AcceptOffer { name, offer } | Cmd::WithdrawOffer { name, offer } | Cmd::RefundOffer { name, offer } => {
+        Cmd::SetPrices { prices, times } => {
+            let authority = keys::load_authority(&l.paths)?;
+            let cur = reg.prices().cloned().ok_or_else(|| anyhow!("no shards tracked; run `scan`"))?;
+            let new = match (prices.len(), times) {
+                (5, None) => {
+                    let mut p = [0u64; 5];
+                    for (i, x) in prices.iter().enumerate() {
+                        p[i] = parse_kas(x).with_context(|| format!("price {} (TKAS)", i + 1))?;
+                    }
+                    p
+                }
+                (0, Some(t)) => {
+                    let (n, d) = t.split_once('/').ok_or_else(|| anyhow!("--times N/D"))?;
+                    let (n, d): (u64, u64) = (n.parse()?, d.parse()?);
+                    ensure!(d > 0, "--times N/D with D > 0");
+                    kit.params.prices.map(|p| p * n / d)
+                }
+                _ => bail!("give five prices in TKAS (1/2/3/4/5+ chars), or --times N/D of the genesis prices"),
+            };
+            let shards = l.all_shards(&kit, &reg).await?;
+            ops::price_update(&env, &wallet, &shards, authority, &cur.authority, &new)?
+        }
+        Cmd::SetAuthority { to } => {
+            let authority = keys::load_authority(&l.paths)?;
+            let new = parse_owner_address(to)?;
+            let cur = reg.prices().cloned().ok_or_else(|| anyhow!("no shards tracked; run `scan`"))?;
+            let shards = l.all_shards(&kit, &reg).await?;
+            ops::price_update(&env, &wallet, &shards, authority, &new, &cur.prices)?
+        }
+        Cmd::AcceptOffer { name, offer }
+        | Cmd::DeclineOffer { name, offer }
+        | Cmd::WithdrawOffer { name, offer }
+        | Cmd::RefundOffer { name, offer } => {
             let o = pick_offer(&reg, name, offer)?.clone();
             let ou = l.live_utxos(&[(o.outpoint, kit.offer.spk(&o.fields.encode()))]).await?.remove(0);
             match cmd {
@@ -517,6 +631,7 @@ async fn spend(l: &Live, cmd: &Cmd) -> Result<()> {
                     let u = l.live_utxos(&[(n.outpoint, kit.name.spk(&n.fields.encode()))]).await?;
                     ops::accept_offer(&env, &n, &u[0], &o, &ou)?
                 }
+                Cmd::DeclineOffer { .. } => ops::decline_offer(&env, &o, &ou)?,
                 Cmd::WithdrawOffer { .. } => ops::withdraw_offer(&env, &o, &ou)?,
                 _ => ops::refund_offer(&env, &o, &ou)?,
             }
@@ -545,16 +660,72 @@ async fn spend(l: &Live, cmd: &Cmd) -> Result<()> {
     Ok(())
 }
 
+/// The deployer's wallet, or one assumed UTXO for a dry run.
+async fn genesis_wallet(l: &Live, assume_utxo: Option<&str>) -> Result<Vec<Utxo>> {
+    let mut wallet = l.wallet().await?;
+    if let Some(a) = assume_utxo {
+        ensure!(!l.submit, "--assume-utxo cannot be submitted");
+        let v = parse_kas(a)?;
+        println!(
+            "DRY RUN with an ASSUMED deployer UTXO of {} (synthetic outpoint 5e5e..5e:0; the ids below are hypothetical)",
+            fmt_kas(v)
+        );
+        wallet = vec![Utxo::new(
+            TransactionOutpoint::new(TransactionId::from_bytes([0x5e; 32]), 0),
+            UtxoEntry::new(v, p2pk_spk(&l.me()), l.point.virtual_daa.saturating_sub(100), false, None),
+        )];
+    }
+    Ok(wallet)
+}
+
+/// The price authority's x-only key: the authority key file (testnet).
+fn authority_x(l: &Live) -> Result<[u8; 32]> {
+    let kp = keys::load_authority(&l.paths).context("the price genesis names the authority: create it with `authority-keygen`")?;
+    Ok(xonly(&kp))
+}
+
+/// The price genesis (registry v3, first).
+async fn price_genesis(l: &Live, assume_utxo: Option<&str>) -> Result<()> {
+    let paths = &l.paths;
+    let params_text = std::fs::read_to_string(paths.params())?;
+    let done = paths.price_genesis().exists() || !params_text.contains("\"priceCovenantId\": null");
+    if done && l.submit {
+        bail!(
+            "{} exists or params carry a priceCovenantId: the price record is already minted. A new one needs the old \
+             record archived and priceCovenantId (and registryCovenantId) set back to null first",
+            paths.rel(&paths.price_genesis())
+        );
+    }
+    let authority = authority_x(l)?;
+    let wallet = genesis_wallet(l, assume_utxo).await?;
+    let (plan, kit) = ops::price_genesis(&l.templates, l.deployer, &authority, &wallet, l.block(), now_ms(), l.point.feerate)?;
+    let pid = plan.price_id.unwrap();
+    let scan_from = Some(l.point.sink);
+    if !l.finish(&plan).await? {
+        println!("would-be price covenant id {pid}; nothing written (dry run)");
+        return Ok(());
+    }
+    let record = manifest::price_genesis_json(&kit, &plan, &authority, scan_from)?;
+    manifest::write(&paths.price_genesis(), &record)?;
+    manifest::fill_params_id(paths, "priceCovenantId", pid)?;
+    println!("price genesis {}", paths.rel(&paths.price_genesis()));
+    println!("params        {} priceCovenantId = {pid}", paths.rel(&paths.params()));
+    println!("next: ./scripts/build.sh   (builds the name and gap for {pid}); then `genesis --submit`");
+    Ok(())
+}
+
+/// The registry genesis (after the price genesis). Without a price genesis yet the
+/// dry run previews both, the registry genesis spending the price genesis's change.
 async fn genesis(l: &Live, assume_utxo: Option<&str>) -> Result<()> {
     let paths = &l.paths;
-    // A real genesis needs a clean slate; a dry run may preview a new registry
-    // (e.g. registry v2) next to the deployed one, writing only manifests/dryrun/.
+    // A real genesis needs a clean slate; a dry run may preview a new registry next to
+    // the deployed one, writing only manifests/dryrun/.
     let params_text = std::fs::read_to_string(paths.params())?;
     let deployed = paths.manifest().exists() || !params_text.contains("\"registryCovenantId\": null");
     if deployed && l.submit {
         bail!(
-            "{} exists or params carry a registryCovenantId: a registry is already deployed. A new genesis (registry v2) \
-             needs the old manifest archived and registryCovenantId set back to null first",
+            "{} exists or params carry a registryCovenantId: a registry is already deployed. A new genesis needs the old \
+             manifest archived and registryCovenantId set back to null first",
             paths.rel(&paths.manifest())
         );
     }
@@ -564,50 +735,55 @@ async fn genesis(l: &Live, assume_utxo: Option<&str>) -> Result<()> {
             paths.rel(&paths.manifest())
         );
     }
-    let mut wallet = l.wallet().await?;
-    if let Some(a) = assume_utxo {
-        ensure!(!l.submit, "--assume-utxo cannot be submitted");
-        let v = parse_kas(a)?;
-        println!(
-            "DRY RUN with an ASSUMED deployer UTXO of {} (synthetic outpoint 5e5e..5e:0; the registry id below is hypothetical)",
-            fmt_kas(v)
-        );
-        wallet = vec![Utxo::new(
-            TransactionOutpoint::new(TransactionId::from_bytes([0x5e; 32]), 0),
-            UtxoEntry::new(v, p2pk_spk(&l.me()), l.point.virtual_daa.saturating_sub(100), false, None),
-        )];
-    }
-    let (plan, kit) = ops::genesis(&l.templates, l.deployer, &wallet, l.block(), now_ms(), l.point.feerate)?;
+    let mut wallet = genesis_wallet(l, assume_utxo).await?;
+    let price_record = match manifest::load_price_genesis(paths)? {
+        Some(r) => r,
+        None => {
+            ensure!(!l.submit, "no price genesis yet: run `price-genesis --submit` (and ./scripts/build.sh) first");
+            println!("no price genesis yet: previewing it first (`price-genesis --submit` mints it)");
+            let authority = authority_x(l)?;
+            let (pplan, pkit) = ops::price_genesis(&l.templates, l.deployer, &authority, &wallet, l.block(), now_ms(), l.point.feerate)?;
+            println!("{}", summary::render(&pplan, false));
+            let k = l.templates.params.price_shards as usize;
+            let change = &pplan.built.tx.outputs[k];
+            wallet = vec![Utxo::new(
+                TransactionOutpoint::new(pplan.txid(), k as u32),
+                UtxoEntry::new(change.value, change.script_public_key.clone(), l.point.virtual_daa, false, None),
+            )];
+            manifest::price_genesis_json(&pkit, &pplan, &authority, Some(l.point.sink))?
+        }
+    };
+    let (pid, _) = manifest::price_genesis_ids(&price_record)?;
+    let (plan, kit) = ops::genesis(&l.templates, pid, l.deployer, &wallet, l.block(), now_ms(), l.point.feerate)?;
     let id = plan.registry_id.unwrap();
     let deployer_addr = keys::address_of(&l.deployer);
-    // the scanner starts from the sink seen before submission
+    // the scanner starts from the sink seen before the price genesis
     let scan_from = Some(l.point.sink);
     let submitted = l.finish(&plan).await?;
-    let m = manifest::build(paths, &kit, &plan, &deployer_addr, scan_from, !submitted)?;
+    let m = manifest::build(paths, &kit, &price_record, &plan, &deployer_addr, scan_from, !submitted)?;
     if submitted {
         manifest::write(&paths.manifest(), &m)?;
-        manifest::fill_params_registry_id(paths, id)?;
-        Registry::at_genesis(id, plan.txid(), kit.params.gap_value, scan_from).save(&paths.state())?;
+        manifest::fill_params_id(paths, "registryCovenantId", id)?;
+        let d = manifest::load(&paths.manifest(), Some(&kit))?;
+        d.genesis_registry(kit.params.gap_value).save(&paths.state())?;
         println!("manifest  {}", paths.rel(&paths.manifest()));
         println!("params    {} registryCovenantId = {id}", paths.rel(&paths.params()));
         println!("state     {}", paths.rel(&paths.state()));
-        println!(
-            "next: ./scripts/build.sh   (builds artifacts/testnet10/KachatOffer.json for {id}); commit params, artifacts and the manifest"
-        );
+        println!("next: ./scripts/build.sh   (builds artifacts/testnet10/KachatOffer.json for {id}); commit params, artifacts, state/price-genesis and the manifest");
         return Ok(());
     }
     let mp = paths.dryrun_manifest();
     manifest::write(&mp, &m)?;
-    println!("would-be manifest written to {} (registry id {id})", paths.rel(&mp));
-    let pp = manifest::dryrun_params(paths, id)?;
+    println!("would-be manifest written to {} (price covenant {pid}, registry id {id})", paths.rel(&mp));
+    let pp = manifest::dryrun_params(paths, pid, id)?;
     println!("would-be params written to {}", paths.rel(&pp));
-    demo_offer_build(paths, &kit, &pp)
+    demo_build(paths, &kit, &pp)
 }
 
-/// Dry run: build the offer artifact for the would-be registry id with
-/// scripts/build.py into manifests/dryrun/artifacts (when the pinned silverc
-/// is available) and check it equals the in-process compile.
-fn demo_offer_build(paths: &Paths, kit: &Kit, params: &std::path::Path) -> Result<()> {
+/// Dry run: build the name, gap and offer artifacts for the would-be ids with
+/// scripts/build.py into manifests/dryrun/artifacts (when the pinned silverc is
+/// available) and check they equal the in-process compiles.
+fn demo_build(paths: &Paths, kit: &Kit, params: &std::path::Path) -> Result<()> {
     let ss = std::env::var("SILVERSCRIPT_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("silverscript"));
@@ -615,7 +791,7 @@ fn demo_offer_build(paths: &Paths, kit: &Kit, params: &std::path::Path) -> Resul
     let out = paths.dryrun_dir().join("artifacts");
     let cmd = format!("python3 scripts/build.py $SILVERSCRIPT_DIR/target/release/silverc {} {}", paths.rel(params), paths.rel(&out));
     if !silverc.exists() {
-        println!("offer build (not run, silverc not found): {cmd}");
+        println!("artifact build (not run, silverc not found): {cmd}");
         return Ok(());
     }
     let st = std::process::Command::new("python3")
@@ -626,14 +802,12 @@ fn demo_offer_build(paths: &Paths, kit: &Kit, params: &std::path::Path) -> Resul
         .arg(&out)
         .status()?;
     ensure!(st.success(), "{cmd} failed");
-    let art: silverscript_abi::SilAbiArtifact = serde_json::from_str(&std::fs::read_to_string(out.join("KachatOffer.json"))?)?;
-    let t = kachat_names_harness::Template::from_artifact(art);
-    ensure!(t.bytecode == kit.offer.bytecode, "build.py offer differs from the in-process compile");
-    println!(
-        "offer artifact built by `{cmd}`: {} B, template hash {} (identical to the in-process compile)",
-        t.bytecode.len(),
-        hex(&t.template_hash)
-    );
+    for (c, t) in [("KachatName", &kit.name), ("KachatGap", &kit.gap), ("KachatOffer", &kit.offer)] {
+        let art: silverscript_abi::SilAbiArtifact = serde_json::from_str(&std::fs::read_to_string(out.join(format!("{c}.json")))?)?;
+        let built = kachat_names_harness::Template::from_artifact(art);
+        ensure!(built.bytecode == t.bytecode, "build.py {c} differs from the in-process compile");
+        println!("{c} built by `{cmd}`: {} B, template hash {} (identical to the in-process compile)", built.bytecode.len(), hex(&built.template_hash));
+    }
     Ok(())
 }
 
@@ -646,6 +820,7 @@ async fn status(l: &Live, do_scan: bool) -> Result<()> {
     }
     reg.check_invariants()?;
     println!("registry {}  (genesis tx {}, funded by {})", d.registry_id, d.genesis_txid, fmt_outpoint(&d.genesis_outpoint));
+    println!("price record {}  (price genesis tx {})", d.price_id, d.price_genesis_txid);
     let tracked = reg.tracked(&kit)?;
     let addrs: Vec<_> = tracked.iter().map(|t| t.address.clone()).collect();
     let found = l.node.utxos(&addrs).await?;
@@ -653,10 +828,25 @@ async fn status(l: &Live, do_scan: bool) -> Result<()> {
     let live_of = |op: &TransactionOutpoint, registry: bool| -> String {
         match found.iter().find(|(_, o, _)| o == op) {
             Some((_, _, e)) if registry && e.covenant_id != Some(reg.registry_id) => "LIVE BUT WRONG COVENANT ID".into(),
+            Some((_, _, e)) if !registry && e.covenant_id.is_some() && e.covenant_id != Some(reg.price_id) => "LIVE BUT WRONG COVENANT ID".into(),
             Some((_, _, e)) => format!("live (DAA {})", e.block_daa_score),
             None => "NOT IN UTXO SET (pending, or spent elsewhere: run `scan`)".into(),
         }
     };
+    let mut shards = reg.shards.clone();
+    shards.sort_by_key(|s| s.shard);
+    if let Some(cur) = shards.first() {
+        println!(
+            "prices per period ({}), 1/2/3/4/5+ chars: {}  (authority {})",
+            fmt_dur(kit.params.period_ms),
+            cur.prices.iter().map(|p| fmt_kas(*p)).collect::<Vec<_>>().join(" / "),
+            p2pk_address(&cur.authority)
+        );
+    }
+    println!("price shards ({}):", shards.len());
+    for sh in &shards {
+        println!("  shard {}  {}  {}", sh.shard, fmt_outpoint(&sh.outpoint), live_of(&sh.outpoint, false));
+    }
     let mut gaps = reg.gaps.clone();
     gaps.sort_by_key(|g| g.lo);
     println!("gaps ({}):", gaps.len());
@@ -677,7 +867,7 @@ async fn status(l: &Live, do_scan: bool) -> Result<()> {
         let next = if now > opens {
             "renewal window open".to_string()
         } else {
-            format!("renewal opens {}, extendable by {} y", fmt_ms(opens), ops::extendable_years(&kit.params, f))
+            format!("renewal opens {}, extendable by {} period(s)", fmt_ms(opens), ops::extendable_years(&kit.params, f))
         };
         println!(
             "  {:<20} owner {}  {}  period {} .. expires {} [{phase}; {next}]  {}  {}",
@@ -693,10 +883,11 @@ async fn status(l: &Live, do_scan: bool) -> Result<()> {
     println!("offers ({}):", reg.offers.len());
     for o in &reg.offers {
         println!(
-            "  {} on {}  buyer {}  refundAfter DAA {}  {}  {}",
+            "  {} on {}  buyer {}  seller {}  refundAfter DAA {}  {}  {}",
             fmt_kas(o.value),
             o.name.clone().unwrap_or_else(|| hex(&o.fields.key)),
             p2pk_address(&o.fields.buyer),
+            p2pk_address(&o.fields.seller),
             o.fields.refund_after,
             fmt_outpoint(&o.outpoint),
             live_of(&o.outpoint, false)
@@ -742,29 +933,27 @@ fn e2e_plan(paths: &Paths, simulate: bool) -> Result<()> {
     println!("# .kachat names: end-to-end run on {NETWORK}");
     println!("# deployer {me}");
     println!("#");
-    println!("# names: alpha-tn, bravo-tn, lapse-tn (8 characters: the 5+ tier, 35 TKAS per year)");
+    println!("# names: alpha-tn, bravo-tn, lapse-tn (8 characters: the 5+ tier, 0.35 TKAS per 10-minute period on testnet)");
     println!("# simulated with {} (every transaction built and validated locally, each spending the previous outputs):", fmt_kas(b.funding));
     println!("#   {}", plan::fmt_budget(&b));
     println!("#   least funding that completes the plan: {} (re-simulated: ends with {})", fmt_kas(need), fmt_kas(b_min.final_balance));
-    let four = 250 * SOMPI + 2 * SOMPI;
+    println!("#   the price record locks {} (8 shards x 1 TKAS) for the registry's life", fmt_kas(8 * SOMPI));
+    println!("#   reclaim: periods are 10 minutes with a 10-minute grace, so a name lapses 20 minutes after it expires;");
     println!(
-        "#   a 4-character name does not fit: 1 year is 250 TKAS + 2 TKAS (bond, gap), and the plan leaves {}",
-        fmt_kas(b.final_balance)
+        "#   lapse-tn is registered with `now` backdated {} minutes: renewed once after lapse (its window is long open), it is still past expiresAt + grace.",
+        plan::LAPSE_BACKDATE_MINUTES
     );
-    debug_assert!(b.final_balance < four);
-    println!("#   reclaim: names are yearly with a 10-day grace, so a plain reclaim needs 1 year + 10 days on testnet too;");
-    println!(
-        "#   lapse-tn is registered with `now` backdated {} days: renewed once after lapse (its window is long open), it is still past expiresAt + grace.",
-        plan::LAPSE_BACKDATE_DAYS
-    );
-    println!("#   renew in its window (10 days before expiry) needs a name close to expiry, so only the vectors and tests cover it.");
     println!();
     println!("kachat-names keygen                # once (done if the address above is set)");
+    println!("kachat-names authority-keygen      # once: the testnet price authority (mainnet: KasSigner)");
     println!("kachat-names node-info             # read-only: network, DAA, deployer UTXOs");
     println!("# fund {me} with {} (at least {})", fmt_kas(PLANNED_FUNDING), fmt_kas(need));
     println!("kachat-names balance");
     for (i, (step, why)) in plan::e2e_steps().iter().enumerate() {
         println!("{:<84} # {:>2}. {why}", plan::command(step, &me), i + 1);
+        if matches!(step, plan::Step::PriceGenesis) {
+            println!("{:<84} #     name and gap artifacts for the new price covenant", "./scripts/build.sh");
+        }
         if matches!(step, plan::Step::Genesis) {
             println!("{:<84} #     offer artifact for the new registry id; commit params + artifacts + manifest", "./scripts/build.sh");
         }

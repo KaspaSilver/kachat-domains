@@ -17,13 +17,18 @@
 //! transactions) for everyone else's.
 //!
 //! Offers carry no covenant id; the CLI tracks the ones it creates.
+//!
+//! Registry v3 adds the price record: K shards under their own price covenant
+//! (minted by the price genesis), read by register / extend / renew (use) and
+//! rewritten together by the authority (update + follow). They are tracked and
+//! predicted the same way.
 
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow, bail};
 use kachat_names_harness::{
-    FF32, Kit, NAME_STATE_LEN, NameFields, OfferFields, Template, TransactionOutput, YEAR_MS, ZERO32, gap_state, name_key, pad_name,
-    scenarios::name_len,
+    FF32, Kit, NAME_STATE_LEN, NameFields, OfferFields, PRICE_STATE_LEN, Template, TransactionOutput, ZERO32, gap_state, name_key,
+    pad_name, price_state, scenarios::name_len,
 };
 use kaspa_consensus_core::tx::{Transaction, TransactionId, TransactionOutpoint};
 use kaspa_hashes::Hash;
@@ -64,6 +69,26 @@ pub struct OfferRec {
     pub name: Option<String>,
 }
 
+/// One price shard (registry v3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PriceRec {
+    pub outpoint: TransactionOutpoint,
+    pub shard: i64,
+    pub authority: [u8; 32],
+    /// sompi per period for names of 1, 2, 3, 4, 5+ bytes
+    pub prices: [u64; 5],
+    pub value: u64,
+}
+
+impl PriceRec {
+    pub fn state(&self) -> Vec<u8> {
+        price_state(self.shard, &self.authority, &self.prices)
+    }
+    pub fn price_for(&self, name_len: usize) -> u64 {
+        self.prices[name_len.clamp(1, 5) - 1]
+    }
+}
+
 pub fn name_str(padded: &[u8; 32]) -> String {
     String::from_utf8_lossy(&padded[..name_len(padded)]).into_owned()
 }
@@ -71,6 +96,9 @@ pub fn name_str(padded: &[u8; 32]) -> String {
 #[derive(Clone, Debug)]
 pub struct Registry {
     pub registry_id: Hash,
+    /// the price covenant (registry v3)
+    pub price_id: Hash,
+    pub shards: Vec<PriceRec>,
     pub gaps: Vec<GapRec>,
     pub names: Vec<NameRec>,
     pub offers: Vec<OfferRec>,
@@ -102,20 +130,22 @@ impl From<&Transaction> for TxView {
     }
 }
 
-/// An offer announced by the `kchat:1:offer:<keyHex>:<buyerXonlyHex>:<refundAfterDaa>`
-/// payload marker, if one of the outputs really is that offer
-/// (P2SH(offer prefix || state || suffix)). Returns (output index, fields).
+/// An offer announced by the registry v3 marker
+/// `kchat:1:offer:<keyHex>:<buyerXonlyHex>:<sellerXonlyHex>:<refundAfterDaa>`, if one of
+/// the outputs really is that offer (P2SH(offer prefix || state || suffix)). Returns
+/// (output index, fields).
 pub fn offer_from_marker(kit: &Kit, tx: &TxView) -> Option<(usize, OfferFields)> {
     let text = std::str::from_utf8(&tx.payload).ok()?;
     let rest = text.strip_prefix("kchat:1:offer:")?;
     let mut parts = rest.split(':');
     let key = unhex32(parts.next()?).ok()?;
     let buyer = unhex32(parts.next()?).ok()?;
+    let seller = unhex32(parts.next()?).ok()?;
     let refund_after: i64 = parts.next()?.parse().ok()?;
     if parts.next().is_some() || refund_after < 0 {
         return None;
     }
-    let fields = OfferFields { key, buyer, refund_after };
+    let fields = OfferFields { key, buyer, seller, refund_after };
     let spk = kit.offer.spk(&fields.encode());
     let idx = tx.outputs.iter().position(|o| o.script_public_key == spk && o.covenant.is_none())?;
     Some((idx, fields))
@@ -150,23 +180,54 @@ fn arg_int(args: &[Vec<u8>], i: usize) -> Result<i64> {
     script_num(args.get(i).ok_or_else(|| anyhow!("missing argument {i}"))?)
 }
 
-/// What a registry spend predicts for the outputs.
+/// What a registry or price spend predicts for the outputs.
 enum Predicted {
     Gap { lo: [u8; 32], hi: [u8; 32] },
     Name(NameFields),
+    Price { shard: i64, authority: [u8; 32], prices: [u64; 5] },
 }
 
 impl Registry {
-    /// The registry right after genesis: the lone genesis gap.
-    pub fn at_genesis(registry_id: Hash, genesis_txid: TransactionId, gap_value: u64, scan_from: Option<Hash>) -> Self {
+    /// The registry right after both geneses: the price genesis's K shards
+    /// (outputs 0..K-1 of `price_genesis_txid`) and the lone genesis gap.
+    #[allow(clippy::too_many_arguments)]
+    pub fn at_genesis(
+        registry_id: Hash,
+        genesis_txid: TransactionId,
+        gap_value: u64,
+        scan_from: Option<Hash>,
+        price_id: Hash,
+        price_genesis_txid: TransactionId,
+        shards: Vec<PriceRec>,
+    ) -> Self {
         Registry {
             registry_id,
+            price_id,
+            shards,
             gaps: vec![GapRec { outpoint: TransactionOutpoint::new(genesis_txid, 0), lo: ZERO32, hi: FF32, value: gap_value }],
             names: vec![],
             offers: vec![],
             scan_from,
-            applied: vec![genesis_txid],
+            applied: vec![price_genesis_txid, genesis_txid],
         }
+    }
+
+    /// The shards the price genesis creates: shard i at output i.
+    pub fn genesis_shards(price_genesis_txid: TransactionId, k: i64, authority: &[u8; 32], prices: &[u64; 5], value: u64) -> Vec<PriceRec> {
+        (0..k)
+            .map(|i| PriceRec {
+                outpoint: TransactionOutpoint::new(price_genesis_txid, i as u32),
+                shard: i,
+                authority: *authority,
+                prices: *prices,
+                value,
+            })
+            .collect()
+    }
+
+    /// The current prices (every shard agrees; shard 0's).
+    pub fn prices(&self) -> Option<&PriceRec> {
+        self.shards.iter().min_by_key(|s| s.shard)
     }
 
     pub fn gap_for_key(&self, key: &[u8; 32]) -> Option<&GapRec> {
@@ -228,8 +289,14 @@ impl Registry {
             .outputs
             .iter()
             .enumerate()
-            .filter(|(_, o)| o.covenant.is_some_and(|c| c.covenant_id == self.registry_id))
+            .filter(|(_, o)| o.covenant.is_some_and(|c| c.covenant_id == self.registry_id || c.covenant_id == self.price_id))
             .map(|(i, _)| i)
+            .collect();
+        let price_ins: Vec<(usize, PriceRec)> = tx
+            .inputs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (op, _))| self.shards.iter().find(|s| s.outpoint == *op).map(|s| (i, s.clone())))
             .collect();
         let gap_ins: Vec<(usize, GapRec)> = tx
             .inputs
@@ -250,7 +317,8 @@ impl Registry {
             .filter_map(|(i, (op, _))| self.offers.iter().find(|o| o.outpoint == *op).map(|o| (i, o.clone())))
             .collect();
         let new_offer = offer_from_marker(kit, tx);
-        if reg_outs.is_empty() && gap_ins.is_empty() && name_ins.is_empty() && offer_ins.is_empty() && new_offer.is_none() {
+        if reg_outs.is_empty() && gap_ins.is_empty() && name_ins.is_empty() && offer_ins.is_empty() && price_ins.is_empty() && new_offer.is_none()
+        {
             return Ok(vec![]);
         }
         let id = tx.id;
@@ -270,11 +338,11 @@ impl Registry {
                     let now = arg_int(&sp.args, 3)?;
                     let years = arg_int(&sp.args, 4)?;
                     let key = name_key(&name);
-                    let f = NameFields::new(&name, &owner, 0, now, now + years * YEAR_MS);
+                    let f = NameFields::new(&name, &owner, 0, now, now + years * kit.params.period_ms);
                     predicted.push((*i as u16, Predicted::Gap { lo: g.lo, hi: key }));
                     predicted.push((*i as u16, Predicted::Gap { lo: key, hi: g.hi }));
                     events.push(format!(
-                        "register {} for {} until {} ({} y, now = {})",
+                        "register {} for {} until {} ({} period(s), now = {})",
                         String::from_utf8_lossy(&name),
                         p2pk_address(&owner),
                         fmt_ms(f.expires_at),
@@ -326,20 +394,52 @@ impl Registry {
                 "extend" => {
                     // periodStart kept, expiresAt + years
                     let years = arg_int(&sp.args, 0)?;
-                    let nf = f.extended(years);
-                    events.push(format!("extend {nm} by {years} y, until {} (period from {})", fmt_ms(nf.expires_at), fmt_ms(nf.period_start)));
+                    let nf = f.extended(years, kit.params.period_ms);
+                    events.push(format!("extend {nm} by {years} period(s), until {} (period from {})", fmt_ms(nf.expires_at), fmt_ms(nf.period_start)));
                     predicted.push((*i as u16, Predicted::Name(nf)));
                 }
                 "renew" => {
                     // a new period from the old expiry
                     let years = arg_int(&sp.args, 0)?;
-                    let nf = f.renewed(years);
-                    events.push(format!("renew {nm} by {years} y, period {} .. {}", fmt_ms(nf.period_start), fmt_ms(nf.expires_at)));
+                    let nf = f.renewed(years, kit.params.period_ms);
+                    events.push(format!("renew {nm} by {years} period(s), period {} .. {}", fmt_ms(nf.period_start), fmt_ms(nf.expires_at)));
                     predicted.push((*i as u16, Predicted::Name(nf)));
                 }
                 "release" => events.push(format!("release {nm}")),
                 "reclaim" => events.push(format!("reclaim {nm} (bond back to {})", p2pk_address(&f.owner))),
                 e => bail!("{id}: unexpected name entry {e}"),
+            }
+        }
+
+        for (i, sh) in &price_ins {
+            let sp = decode_spend(&kit.price, &tx.inputs[*i].1).with_context(|| format!("{id}: price input {i}"))?;
+            if sp.redeem != kit.price.redeem(&sh.state()) {
+                bail!("{id}: price input {i} reveals a redeem script that is not the tracked shard state");
+            }
+            match sp.entry.as_str() {
+                "use" => predicted.push((*i as u16, Predicted::Price { shard: sh.shard, authority: sh.authority, prices: sh.prices })),
+                "update" => {
+                    let authority = arg32(&sp.args, 0)?;
+                    let mut prices = [0u64; 5];
+                    for (t, p) in prices.iter_mut().enumerate() {
+                        *p = u64::try_from(arg_int(&sp.args, 1 + t)?).map_err(|_| anyhow!("{id}: negative price"))?;
+                    }
+                    // shard 0 writes every shard's continuation; each is authorized by that shard's input
+                    for (j, other) in &price_ins {
+                        predicted.push((*j as u16, Predicted::Price { shard: other.shard, authority, prices }));
+                    }
+                    if prices != sh.prices {
+                        events.push(format!(
+                            "prices set to {} per period (1/2/3/4/5+ chars)",
+                            prices.iter().map(|p| crate::util::fmt_kas(*p)).collect::<Vec<_>>().join(" / ")
+                        ));
+                    }
+                    if authority != sh.authority {
+                        events.push(format!("price authority rotated to {}", hex(&authority)));
+                    }
+                }
+                "follow" => {}
+                e => bail!("{id}: unexpected price entry {e}"),
             }
         }
 
@@ -352,9 +452,10 @@ impl Registry {
         // Match predictions to the registry outputs, one to one.
         let mut matched: BTreeMap<usize, Predicted> = BTreeMap::new();
         for (auth, p) in predicted {
-            let spk = match &p {
-                Predicted::Gap { lo, hi } => kit.gap.spk(&gap_state(lo, hi)),
-                Predicted::Name(f) => kit.name.spk(&f.encode()),
+            let (spk, cov) = match &p {
+                Predicted::Gap { lo, hi } => (kit.gap.spk(&gap_state(lo, hi)), self.registry_id),
+                Predicted::Name(f) => (kit.name.spk(&f.encode()), self.registry_id),
+                Predicted::Price { shard, authority, prices } => (kit.price.spk(&price_state(*shard, authority, prices)), self.price_id),
             };
             let idx = reg_outs
                 .iter()
@@ -362,14 +463,14 @@ impl Registry {
                 .find(|j| {
                     !matched.contains_key(j)
                         && tx.outputs[*j].script_public_key == spk
-                        && tx.outputs[*j].covenant.is_some_and(|c| c.authorizing_input == auth)
+                        && tx.outputs[*j].covenant.is_some_and(|c| c.authorizing_input == auth && c.covenant_id == cov)
                 })
                 .ok_or_else(|| anyhow!("{id}: predicted registry output not found (authorized by input {auth})"))?;
             matched.insert(idx, p);
         }
         if let Some(extra) = reg_outs.iter().find(|j| !matched.contains_key(j)) {
             bail!(
-                "{id}: registry output {extra} is not explained by any tracked registry input; the local state is stale (run `scan`)"
+                "{id}: registry / price output {extra} is not explained by any tracked input; the local state is stale (run `scan`)"
             );
         }
 
@@ -378,22 +479,25 @@ impl Registry {
         self.gaps.retain(|g| !spent.contains(&g.outpoint));
         self.names.retain(|n| !spent.contains(&n.outpoint));
         self.offers.retain(|o| !spent.contains(&o.outpoint));
+        self.shards.retain(|s| !spent.contains(&s.outpoint));
         for (idx, p) in matched {
             let op = TransactionOutpoint::new(id, idx as u32);
             let value = tx.outputs[idx].value;
             match p {
                 Predicted::Gap { lo, hi } => self.gaps.push(GapRec { outpoint: op, lo, hi, value }),
                 Predicted::Name(fields) => self.names.push(NameRec { outpoint: op, fields, value }),
+                Predicted::Price { shard, authority, prices } => self.shards.push(PriceRec { outpoint: op, shard, authority, prices, value }),
             }
         }
         if let Some((idx, fields)) = new_offer {
             let op = TransactionOutpoint::new(id, idx as u32);
             let known = self.names.iter().find(|n| n.fields.key == fields.key).map(|n| n.name());
             events.push(format!(
-                "offer {} on {} by {} (refundAfter DAA {})",
+                "offer {} on {} by {} to {} (refundAfter DAA {})",
                 crate::util::fmt_kas(tx.outputs[idx].value),
                 known.clone().unwrap_or_else(|| hex(&fields.key[..8])),
                 p2pk_address(&fields.buyer),
+                p2pk_address(&fields.seller),
                 fields.refund_after
             ));
             self.offers.retain(|o| o.outpoint != op);
@@ -416,7 +520,13 @@ impl Registry {
 
     pub fn to_json(&self) -> Value {
         json!({
+            "registryVersion": 3,
             "registryCovenantId": self.registry_id.to_string(),
+            "priceCovenantId": self.price_id.to_string(),
+            "shards": self.shards.iter().map(|p| json!({
+                "outpoint": fmt_outpoint(&p.outpoint), "shard": p.shard, "authority": hex(&p.authority),
+                "prices": p.prices, "value": p.value,
+            })).collect::<Vec<_>>(),
             "scanFrom": self.scan_from.map(|h| h.to_string()),
             "gaps": self.gaps.iter().map(|g| json!({
                 "outpoint": fmt_outpoint(&g.outpoint), "lo": hex(&g.lo), "hi": hex(&g.hi), "value": g.value,
@@ -428,7 +538,7 @@ impl Registry {
             })).collect::<Vec<_>>(),
             "offers": self.offers.iter().map(|o| json!({
                 "outpoint": fmt_outpoint(&o.outpoint), "key": hex(&o.fields.key), "name": o.name,
-                "buyer": hex(&o.fields.buyer), "refundAfter": o.fields.refund_after, "value": o.value,
+                "buyer": hex(&o.fields.buyer), "seller": hex(&o.fields.seller), "refundAfter": o.fields.refund_after, "value": o.value,
             })).collect::<Vec<_>>(),
             "applied": self.applied.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
         })
@@ -471,11 +581,30 @@ impl Registry {
                 fields: OfferFields {
                     key: unhex32(&s(&o, "key")?)?,
                     buyer: unhex32(&s(&o, "buyer")?)?,
+                    seller: unhex32(&s(&o, "seller")?).map_err(|_| anyhow!("state: an offer without a seller (a registry v2 state file?)"))?,
                     refund_after: i(&o, "refundAfter")?,
                 },
                 value: u(&o, "value")?,
                 name: o["name"].as_str().map(str::to_string),
             });
+        }
+        let mut shards = vec![];
+        for p in arr("shards") {
+            let pr = p["prices"].as_array().ok_or_else(|| anyhow!("shard without prices"))?;
+            let mut prices = [0u64; 5];
+            for (t, x) in prices.iter_mut().enumerate() {
+                *x = pr.get(t).and_then(|v| v.as_u64()).ok_or_else(|| anyhow!("shard price {t}"))?;
+            }
+            shards.push(PriceRec {
+                outpoint: parse_outpoint(&s(&p, "outpoint")?)?,
+                shard: i(&p, "shard")?,
+                authority: unhex32(&s(&p, "authority")?)?,
+                prices,
+                value: u(&p, "value")?,
+            });
+        }
+        if v["registryVersion"].as_i64() != Some(3) {
+            bail!("state: not a registry v3 state file (archive it and run `scan --from-genesis`)");
         }
         let applied = arr("applied")
             .iter()
@@ -484,6 +613,8 @@ impl Registry {
             .collect::<Result<Vec<_>>>()?;
         Ok(Registry {
             registry_id: Hash::from_bytes(unhex32(&s(v, "registryCovenantId")?)?),
+            price_id: Hash::from_bytes(unhex32(&s(v, "priceCovenantId")?)?),
+            shards,
             gaps,
             names,
             offers,
@@ -521,6 +652,17 @@ impl Registry {
             let spk = kit.name.spk(&n.fields.encode());
             out.push(Tracked { kind: "name", label: n.name(), outpoint: n.outpoint, address: spk_address(&spk)?, value: n.value, registry: true });
         }
+        for p in &self.shards {
+            let spk = kit.price.spk(&p.state());
+            out.push(Tracked {
+                kind: "price",
+                label: format!("price shard {}", p.shard),
+                outpoint: p.outpoint,
+                address: spk_address(&spk)?,
+                value: p.value,
+                registry: false,
+            });
+        }
         for o in &self.offers {
             let spk = kit.offer.spk(&o.fields.encode());
             let label = format!("offer on {}", o.name.clone().unwrap_or_else(|| hex(&o.fields.key[..8])));
@@ -539,6 +681,25 @@ pub struct Tracked {
     pub value: u64,
     /// carries the registry covenant id
     pub registry: bool,
+}
+
+/// Decode a price shard state from its 87 bytes:
+/// `0x08 shard 0x20 authority (0x08 price) x5`.
+pub fn decode_price_state(state: &[u8]) -> Result<(i64, [u8; 32], [u64; 5])> {
+    if state.len() != PRICE_STATE_LEN || state[0] != 0x08 || state[9] != 0x20 {
+        bail!("not a price state");
+    }
+    let shard = num8_decode(&state[1..9])?;
+    let authority: [u8; 32] = state[10..42].try_into().unwrap();
+    let mut prices = [0u64; 5];
+    for (t, p) in prices.iter_mut().enumerate() {
+        let at = 42 + t * 9;
+        if state[at] != 0x08 {
+            bail!("not a price state");
+        }
+        *p = u64::try_from(num8_decode(&state[at + 1..at + 9])?).map_err(|_| anyhow!("negative price"))?;
+    }
+    Ok((shard, authority, prices))
 }
 
 /// Decode a name state from its 126 bytes (for display / checks):

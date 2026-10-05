@@ -62,6 +62,14 @@ impl Paths {
     pub fn state(&self) -> PathBuf {
         self.root.join("state").join(format!("registry-{NETWORK}.json"))
     }
+    /// The price genesis, recorded when it is broadcast (registry v3, before the registry genesis).
+    pub fn price_genesis(&self) -> PathBuf {
+        self.root.join("state").join(format!("price-genesis-{NETWORK}.json"))
+    }
+    /// The price authority key (testnet: a local key; mainnet signs on KasSigner).
+    pub fn authority_key(&self) -> PathBuf {
+        self.secrets_dir().join("testnet10-authority.key")
+    }
     pub fn manifest(&self) -> PathBuf {
         self.root.join("manifests").join(format!("kachat-names-{NETWORK}.json"))
     }

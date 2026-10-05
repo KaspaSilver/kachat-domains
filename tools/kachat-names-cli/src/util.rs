@@ -68,6 +68,21 @@ pub fn fmt_ms(ms: i64) -> String {
     format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC", tod / 3600, (tod % 3600) / 60, tod % 60)
 }
 
+/// A duration for humans: "10 min", "2.0 h", "10.0 days", "1.0 years".
+pub fn fmt_dur(ms: i64) -> String {
+    let m = ms.unsigned_abs() as f64;
+    let sign = if ms < 0 { "-" } else { "" };
+    if m < 3_600_000.0 {
+        format!("{sign}{:.0} min", m / 60_000.0)
+    } else if m < 86_400_000.0 {
+        format!("{sign}{:.1} h", m / 3_600_000.0)
+    } else if m < 31_536_000_000.0 {
+        format!("{sign}{:.1} days", m / 86_400_000.0)
+    } else {
+        format!("{sign}{:.1} years", m / 31_536_000_000.0)
+    }
+}
+
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
 }

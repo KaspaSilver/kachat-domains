@@ -1,8 +1,15 @@
 # .kachat registry v3
 
-**Status (2026-10-05):** contracts and engine-backed harness are written on the `v3` branch,
-along with a mutation check. Still to do: CLI, app, indexer handoff, testnet genesis
-(dry run and then the owner's "send it"), and an audit before mainnet.
+**Status (2026-10-05):** on the `v3` branch. Done:
+- the contracts, the engine-backed harness and the mutation check;
+- the CLI (`tools/kachat-names-cli`): both geneses, prices, decline, shard reads, and the
+  test vectors for the app.
+
+Still to do:
+- the app;
+- the indexer handoff;
+- the testnet geneses (a dry run, then the owner's "send it");
+- an audit before mainnet.
 
 v3 replaces v2. Testnet gets a new registry and v2's test names are left behind, as v1's were.
 
@@ -114,12 +121,20 @@ Template sizes: price 1,691 B, gap 4,498 B, name 4,058 B, offer 1,114 B.
 
 1. **Mutation check** (`scripts/mutation-check.sh`, 90 mutations): every surviving mutation is
    either explained as redundant or covered by a new test.
-2. **CLI:**
-   - price genesis, then registry genesis;
-   - `set-prices` and `set-authority` through KasSigner;
-   - shard selection for register, extend and renew;
-   - `decline`;
-   - the test vectors.
+2. **CLI: done.**
+   - **New commands:** `authority-keygen`, `price-genesis`, `genesis` (the registry; its dry run
+     previews both geneses), `prices`, `set-prices <5 TKAS> | --times N/D`, `set-authority`,
+     `decline-offer`, and `--backdate-minutes`.
+   - **Paid operations:** register, extend and renew read a random live shard.
+   - **Offers** are made to the name's owner.
+   - **The manifest** carries `priceGenesis` and verifies both covenant-id bindings.
+   - **The walker** follows the shards.
+   - **Rehearsal:** `e2e-plan` simulates the whole testnet rehearsal: 25 transactions, about
+     69 TKAS needed.
+   - **Test vectors:** `kachat-names-vectors` writes the app's vectors: 38 transactions plus the
+     codecs, with recommended compute budgets updated for v3.
+   - **Mainnet:** the authority signs on KasSigner. This CLI is testnet-only and uses a local
+     authority key.
 3. **App:**
    - builder port and vectors;
    - shard pick and retry;
