@@ -135,7 +135,7 @@ mutate $P 'require(OpCovInputIdx(covId, shard) == this.activeInputIndex, "shards
 mutate $P 'require(OpAuthOutputCount(this.activeInputIndex) == 1, "one continuation");
         require(OpAuthOutputIdx' 'require(OpAuthOutputIdx' "price: a change continues each shard once (redundant with every shard continues; the pair is tested below)"
 mutate $P 'require(OpAuthOutputIdx(this.activeInputIndex, 0) == OpCovOutputIdx(covId, shard), "continuations in order");' '' "price: continuations in order (redundant: shard 0 writes state j at the j-th price output, whoever authorizes it)"
-mutate $P 'require(OpCovInputCount(covId) == 1, "one price input");' '' "price: use reads one shard"
+mutate $P 'require(OpCovInputCount(covId) == 1, "one price input");' '' "price: use reads one shard (redundant with one price output; the pair is tested below)"
 mutate $P 'require(OpCovOutputCount(covId) == 1, "one price output");' '' "price: use mints no extra shard (redundant with one continuation; the pair is tested below)"
 mutate $P 'require(OpAuthOutputCount(this.activeInputIndex) == 1, "one continuation");
         int out' 'int out' "price: use has one continuation (redundant with one price output)"
@@ -148,4 +148,6 @@ mutate $P 'require(OpCovOutputCount(covId) == shards, "every shard continues");
         require(OpAuthOutputCount(this.activeInputIndex) == 1, "one continuation");' 'require(OpCovInputIdx(covId, shard) == this.activeInputIndex, "shards in order");' "price: a change's output count AND one continuation per shard (both removed)"
 mutate $P 'require(OpCovOutputCount(covId) == 1, "one price output");
         require(OpAuthOutputCount(this.activeInputIndex) == 1, "one continuation");' '' "price: use's output count AND one continuation (both removed)"
+mutate $P 'require(OpCovInputCount(covId) == 1, "one price input");
+        require(OpCovOutputCount(covId) == 1, "one price output");' '' "price: use's input count AND output count (both removed: a change could hide behind a use)"
 mutate $P 'State { shard: j, authority: newAuthority' 'State { shard: shard, authority: newAuthority' "price: a change keeps each shard number"
