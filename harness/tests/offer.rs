@@ -306,6 +306,30 @@ fn decline_pays_the_buyer_alone_and_in_full() {
     offer_fails(&kit, &spec, active_block(), 0);
 }
 
+#[test]
+fn decline_is_alone() {
+    // another input in the same transaction, the buyer's single output covering both:
+    // the return could then double as some other spend's required payment
+    let kit = Kit::new();
+    let o = offer_case(&kit, b"alice", V);
+    let seller = o.n.owner;
+    let mut spec = decline(&kit, &o);
+    spec.inputs.push(Input::new(kit.p2pk_utxo(&seller, kas(1), 44), Unlock::P2pk(seller)));
+    spec.outputs[0].value += kas(1);
+    offer_fails(&kit, &spec, active_block(), 0);
+}
+
+#[test]
+fn decline_has_one_output() {
+    // the buyer gets V - maxFee and the seller skims the rest of maxFee in a second output
+    let kit = Kit::new();
+    let o = offer_case(&kit, b"alice", V);
+    let mut spec = decline(&kit, &o);
+    spec.outputs[0].value = V - kit.params.offer_max_fee;
+    spec.outputs.push(TransactionOutput::new(kit.params.offer_max_fee - NET_FEE, p2pk_spk(&o.n.fields.owner)));
+    offer_fails(&kit, &spec, active_block(), 0);
+}
+
 // ---------------------------------------------------------------- withdraw
 
 #[test]

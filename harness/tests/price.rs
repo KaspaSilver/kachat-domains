@@ -117,16 +117,14 @@ fn a_look_alike_shard_does_not_set_the_price() {
     let kit = Kit::new();
     let ax = xonly(&kit.authority);
     let free = [0u64; 5];
-    let fake = Utxo::new(
-        TransactionOutpoint::new(TransactionId::from_bytes([77; 32]), 0),
-        UtxoEntry::new(kit.params.price_value, kit.price.spk(&price_state(3, &ax, &free)), 1_000, false, None),
-    );
-    let fake_in = |redeem_state: Vec<u8>| Input::new(fake.clone(), Unlock::Contract {
-        tpl: kit.price.clone(),
-        redeem: kit.price.redeem(&redeem_state),
-        entry: "use".into(),
-        args: vec![],
-    });
+    // the fake's address and its revealed redeem script agree (only the covenant id is missing)
+    let fake_in = |state: Vec<u8>| {
+        let utxo = Utxo::new(
+            TransactionOutpoint::new(TransactionId::from_bytes([77; 32]), 0),
+            UtxoEntry::new(kit.params.price_value, kit.price.spk(&state), 1_000, false, None),
+        );
+        Input::new(utxo, Unlock::Contract { tpl: kit.price.clone(), redeem: kit.price.redeem(&state), entry: "use".into(), args: vec![] })
+    };
     let mut r = register(&kit, b"alice", 1);
     r.spec.inputs[REG_PRICE_IDX] = fake_in(price_state(3, &ax, &free));
     r.spec.outputs[3] = TransactionOutput::new(kit.params.price_value, kit.price.spk(&price_state(3, &ax, &free)));
@@ -193,17 +191,63 @@ fn the_authority_changes_every_price_at_once() {
     ok(&kit, &price_update(&kit, &ax, &[100_000_000_000_000_000; 5]), active_block());
 }
 
+/// Price state with signed prices (to write a negative one).
+fn price_state_signed(shard: i64, authority: &[u8; 32], prices: &[i64; 5]) -> Vec<u8> {
+    let mut v = [&[0x08u8][..], &num8(shard), &[0x20], authority].concat();
+    for p in prices {
+        v.push(0x08);
+        v.extend(num8(*p));
+    }
+    v
+}
+
 #[test]
 fn prices_are_refused_out_of_range() {
+    // every shard's continuation carries the out-of-range price too, so only the range
+    // check can refuse it
     let kit = Kit::new();
     let ax = xonly(&kit.authority);
     for bad in [-1i64, 100_000_000_000_000_001] {
         for tier in 0..5 {
+            let mut prices = kit.params.prices.map(|p| p as i64);
+            prices[tier] = bad;
             let mut spec = price_update(&kit, &ax, &kit.params.prices);
             spec.inputs[0].args_mut()[1 + tier] = int(bad);
+            for j in 0..kit.params.price_shards as usize {
+                let o = &mut spec.outputs[j];
+                o.script_public_key = kit.price.spk(&price_state_signed(j as i64, &ax, &prices));
+            }
             input_fails(&kit, &spec, active_block(), 0);
         }
     }
+}
+
+#[test]
+fn a_change_mints_no_extra_shard() {
+    // a follower authorizes a second price output - a ninth shard at free prices that
+    // shard 0's per-position checks would never look at
+    let kit = Kit::new();
+    let ax = xonly(&kit.authority);
+    let mut spec = price_update(&kit, &ax, &doubled(&kit));
+    let k = kit.params.price_shards as usize;
+    spec.outputs.insert(k, kit.price_output(8, &ax, &[0; 5], 3));
+    spec.outputs.last_mut().unwrap().value -= kit.params.price_value;
+    let built = kit.build(&spec);
+    assert!(built.run_inputs().iter().take(k).any(|r| r.is_err()));
+    assert!(kit.validate(&built, active_block()).is_err());
+}
+
+#[test]
+fn a_change_cannot_hide_behind_a_use() {
+    // shard 0 runs use() (unchanged, unsigned) while every other shard follows with free
+    // prices: the followers never check their own state, so use() must refuse to share
+    // the transaction with other shards
+    let kit = Kit::new();
+    let ax = xonly(&kit.authority);
+    let mut spec = price_update(&kit, &ax, &[0; 5]);
+    spec.inputs[0].set_entry("use", vec![]);
+    spec.outputs[0] = kit.price_output(0, &ax, &kit.params.prices, 0);
+    input_fails(&kit, &spec, active_block(), 0);
 }
 
 #[test]
