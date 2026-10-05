@@ -47,6 +47,7 @@ pub use silverscript_abi::ArtifactValue;
 use silverscript_abi::{SilAbiArtifact, encode_contract_entry_sig_script};
 
 pub const SOMPI_PER_KAS: u64 = 100_000_000;
+/// A mainnet period (registry v3 bakes `periodMs`; testnet runs a 10-minute clock).
 pub const YEAR_MS: i64 = 31_536_000_000;
 /// Default compute budget used while measuring an input that fails (attack tests).
 const FALLBACK_BUDGET: u16 = 1_000;
@@ -70,13 +71,19 @@ pub struct NetParams {
     pub bond: u64,
     pub gap_value: u64,
     pub t_commit: u64,
+    /// most periods a registration / extension may prepay
     pub max_years: i64,
+    /// one paid period, ms (registry v3: a year on mainnet, 10 minutes on testnet)
+    pub period_ms: i64,
     pub grace_ms: i64,
-    /// renew is valid from expiresAt - renew_window_ms on (registry v2)
+    /// renew is valid from expiresAt - renew_window_ms on
     pub renew_window_ms: i64,
-    /// sompi per year for names of 1, 2, 3, 4, 5+ bytes
+    /// the price record's genesis prices: sompi per period for names of 1, 2,
+    /// 3, 4, 5+ bytes (registering and renewing)
     pub prices: [u64; 5],
-    pub renew_prices: [u64; 5],
+    pub price_shards: i64,
+    /// exact value of every price shard
+    pub price_value: u64,
     pub offer_max_fee: u64,
 }
 
@@ -100,10 +107,12 @@ impl NetParams {
             gap_value: u(&v["gapValue"]),
             t_commit: u(&v["tCommit"]),
             max_years: u(&v["maxYears"]) as i64,
+            period_ms: u(&v["periodMs"]) as i64,
             grace_ms: u(&v["graceMs"]) as i64,
             renew_window_ms: u(&v["renewWindowMs"]) as i64,
             prices: tiers(&v["prices"]),
-            renew_prices: tiers(&v["renewPrices"]),
+            price_shards: u(&v["priceShards"]) as i64,
+            price_value: u(&v["priceValue"]),
             offer_max_fee: u(&v["offerMaxFee"]),
         }
     }
@@ -112,8 +121,9 @@ impl NetParams {
         self.prices[name_len.clamp(1, 5) - 1]
     }
 
+    /// Registry v3 has one table: renewing costs what registering costs.
     pub fn renew_price_for(&self, name_len: usize) -> u64 {
-        self.renew_prices[name_len.clamp(1, 5) - 1]
+        self.price_for(name_len)
     }
 }
 
@@ -220,10 +230,22 @@ pub fn name_state(key: &[u8; 32], padded_name: &[u8; 32], owner: &[u8; 32], pric
 /// Length of the name state.
 pub const NAME_STATE_LEN: usize = 126;
 
-/// Offer state, 75 bytes: `0x20 key 0x20 buyer 0x08 refundAfter`.
-pub fn offer_state(key: &[u8; 32], buyer: &[u8; 32], refund_after: i64) -> Vec<u8> {
-    [&[0x20u8][..], key, &[0x20], buyer, &[0x08], &num8(refund_after)].concat()
+/// Offer state, 108 bytes: `0x20 key 0x20 buyer 0x20 seller 0x08 refundAfter`.
+pub fn offer_state(key: &[u8; 32], buyer: &[u8; 32], seller: &[u8; 32], refund_after: i64) -> Vec<u8> {
+    [&[0x20u8][..], key, &[0x20], buyer, &[0x20], seller, &[0x08], &num8(refund_after)].concat()
 }
+
+/// Price shard state, 87 bytes: `0x08 shard 0x20 authority 0x08 p1 .. 0x08 p5`.
+pub fn price_state(shard: i64, authority: &[u8; 32], prices: &[u64; 5]) -> Vec<u8> {
+    let mut v = [&[0x08u8][..], &num8(shard), &[0x20], authority].concat();
+    for p in prices {
+        v.push(0x08);
+        v.extend(num8(*p as i64));
+    }
+    v
+}
+
+pub const PRICE_STATE_LEN: usize = 87;
 
 pub fn name_key(name: &[u8]) -> [u8; 32] {
     *blake3::hash(name).as_bytes()
@@ -276,10 +298,16 @@ pub fn xonly(kp: &Keypair) -> [u8; 32] {
 
 pub struct Kit {
     pub params: NetParams,
+    pub price: Arc<Template>,
     pub name: Arc<Template>,
     pub gap: Arc<Template>,
     pub offer: Arc<Template>,
+    /// the price covenant (registry v3), minted by `price_genesis_tx`
+    pub price_id: Hash,
+    /// the key that may change prices (keypair 201 in tests)
+    pub authority: Keypair,
     pub registry_id: Hash,
+    pub price_genesis_tx: Built,
     pub genesis_tx: Built,
     /// consensus params the validator and the mass/fee figures use
     pub consensus: Params,
@@ -300,12 +328,26 @@ impl Kit {
     pub fn for_network(params_file: &str) -> Self {
         let root = repo_root();
         let params = NetParams::load_in(&root, params_file);
-        let name = Arc::new(Template::load_in(&root, params_file, "KachatName"));
-        let gap = Arc::new(Template::load_in(&root, params_file, "KachatGap"));
-
-        // Genesis: one ordinary UTXO creates the lone genesis gap (00..00, ff..ff),
-        // the only output of its covenant group.
+        let price = Arc::new(Template::load_in(&root, params_file, "KachatPrice"));
         let deployer = keypair(200);
+        let authority = keypair(201);
+
+        // Price genesis (registry v3, first): one ordinary UTXO creates the K
+        // shards, the only outputs of the price covenant group.
+        let price_funding = Utxo::new(
+            TransactionOutpoint::new(TransactionId::from_bytes([0x41; 32]), 0),
+            UtxoEntry::new(20 * SOMPI_PER_KAS, p2pk_spk(&xonly(&deployer)), 1_000, false, None),
+        );
+        let shards_value = params.price_value * params.price_shards as u64;
+        let price_change = TransactionOutput::new(20 * SOMPI_PER_KAS - shards_value - 500_000, p2pk_spk(&xonly(&deployer)));
+        let (price_spec, price_id) = price_genesis_spec(&params, &price, &xonly(&authority), price_funding, deployer, vec![price_change]);
+
+        // The name and gap bake the price covenant, so they compile now.
+        let name = Arc::new(compile_name_in(&root, &params, &price, price_id));
+        let gap = Arc::new(compile_gap_in(&root, &params, &name, &price, price_id));
+
+        // Registry genesis: one ordinary UTXO creates the lone genesis gap
+        // (00..00, ff..ff), the only output of its covenant group.
         let genesis_funding = Utxo::new(
             TransactionOutpoint::new(TransactionId::from_bytes([0x42; 32]), 0),
             UtxoEntry::new(10 * SOMPI_PER_KAS, p2pk_spk(&xonly(&deployer)), 1_000, false, None),
@@ -313,19 +355,54 @@ impl Kit {
         let change = TransactionOutput::new(10 * SOMPI_PER_KAS - params.gap_value - 500_000, p2pk_spk(&xonly(&deployer)));
         let (spec, registry_id) = genesis_spec(&params, &gap, genesis_funding, deployer, vec![change]);
         let offer = Arc::new(compile_offer_in(&root, &params, &name, registry_id));
-        let mut kit = Self::assemble_kit(params, name, gap, offer, registry_id, MAINNET_PARAMS);
+        let mut kit = Self::assemble_kit(params, price, name, gap, offer, price_id, authority, registry_id, MAINNET_PARAMS);
+        kit.price_genesis_tx = kit.build(&price_spec);
         kit.genesis_tx = kit.build(&spec);
         kit
     }
 
-    /// A kit for an existing registry (`registry_id` from a real or a
-    /// would-be genesis), validating under `consensus` params. `offer` is the
-    /// KachatOffer compiled for that id. `genesis_tx` is left empty.
-    pub fn with_registry(params: NetParams, name: Template, gap: Template, offer: Template, registry_id: Hash, consensus: Params) -> Self {
-        Self::assemble_kit(params, Arc::new(name), Arc::new(gap), Arc::new(offer), registry_id, consensus)
+    /// A kit for an existing registry (`price_id` and `registry_id` from real
+    /// or would-be geneses), validating under `consensus` params. `name`,
+    /// `gap` and `offer` are compiled for those ids. Both genesis txs are
+    /// left empty, and `authority` is whatever key the caller holds (or a
+    /// placeholder).
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_registry(
+        params: NetParams,
+        price: Template,
+        name: Template,
+        gap: Template,
+        offer: Template,
+        price_id: Hash,
+        authority: Keypair,
+        registry_id: Hash,
+        consensus: Params,
+    ) -> Self {
+        Self::assemble_kit(
+            params,
+            Arc::new(price),
+            Arc::new(name),
+            Arc::new(gap),
+            Arc::new(offer),
+            price_id,
+            authority,
+            registry_id,
+            consensus,
+        )
     }
 
-    fn assemble_kit(params: NetParams, name: Arc<Template>, gap: Arc<Template>, offer: Arc<Template>, registry_id: Hash, p: Params) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_kit(
+        params: NetParams,
+        price: Arc<Template>,
+        name: Arc<Template>,
+        gap: Arc<Template>,
+        offer: Arc<Template>,
+        price_id: Hash,
+        authority: Keypair,
+        registry_id: Hash,
+        p: Params,
+    ) -> Self {
         let mass_calculator = MassCalculator::new_with_consensus_params(&p);
         let validator = TransactionValidator::new(
             p.max_tx_inputs,
@@ -340,13 +417,18 @@ impl Kit {
             ForkActivation::always(),
             p.mass_per_sig_op,
         );
+        let empty = || Built { tx: Transaction::new(1, vec![], vec![], 0, SUBNETWORK_ID_NATIVE, 0, vec![]), entries: vec![], budgets: vec![], used_units: vec![] };
         Kit {
             params,
+            price,
             name,
             gap,
             offer,
+            price_id,
+            authority,
             registry_id,
-            genesis_tx: Built { tx: Transaction::new(1, vec![], vec![], 0, SUBNETWORK_ID_NATIVE, 0, vec![]), entries: vec![], budgets: vec![], used_units: vec![] },
+            price_genesis_tx: empty(),
+            genesis_tx: empty(),
             consensus: p,
             validator,
             mass_calculator,
@@ -373,6 +455,30 @@ impl Kit {
             TransactionOutpoint::new(TransactionId::from_bytes([tag; 32]), tag as u32),
             UtxoEntry::new(value, self.offer.spk(&state.encode()), 1_000, false, None),
         )
+    }
+
+    /// Price shard `shard` with the genesis prices (or `prices`).
+    pub fn price_utxo(&self, shard: i64, prices: &[u64; 5], tag: u8) -> Utxo {
+        Utxo::new(
+            TransactionOutpoint::new(TransactionId::from_bytes([tag; 32]), tag as u32),
+            UtxoEntry::new(self.params.price_value, self.price.spk(&price_state(shard, &xonly(&self.authority), prices)), 1_000, false, Some(self.price_id)),
+        )
+    }
+
+    pub fn price_output(&self, shard: i64, authority: &[u8; 32], prices: &[u64; 5], authorizing_input: u16) -> TransactionOutput {
+        TransactionOutput::with_covenant(
+            self.params.price_value,
+            self.price.spk(&price_state(shard, authority, prices)),
+            Some(CovenantBinding { authorizing_input, covenant_id: self.price_id }),
+        )
+    }
+
+    /// Shard `shard` read by a register / extend / renew: its use() input and
+    /// its unchanged continuation (authorized by that input).
+    pub fn price_use(&self, shard: i64, prices: &[u64; 5], input_idx: u16, tag: u8) -> (Input, TransactionOutput) {
+        let state = price_state(shard, &xonly(&self.authority), prices);
+        let input = Input::contract(self.price_utxo(shard, prices, tag), &self.price, state, "use", vec![]);
+        (input, self.price_output(shard, &xonly(&self.authority), prices, input_idx))
     }
 
     pub fn p2pk_utxo(&self, owner: &Keypair, value: u64, tag: u8) -> Utxo {
@@ -546,6 +652,84 @@ pub fn genesis_spec(
     (TxSpec { inputs: vec![Input::new(funding, Unlock::P2pk(deployer))], outputs, lock_time: 0 }, registry_id)
 }
 
+/// The price genesis (registry v3): `funding` creates shards 0..K-1 with the
+/// params' genesis prices and `authority`, at outputs 0..K-1, all bound to
+/// `covenant_id(funding outpoint, [(i, shard_i)])`, plus the given unbound
+/// outputs. Returns the spec and the price covenant id.
+pub fn price_genesis_spec(
+    params: &NetParams,
+    price: &Template,
+    authority: &[u8; 32],
+    funding: Utxo,
+    deployer: Keypair,
+    unbound: Vec<TransactionOutput>,
+) -> (TxSpec, Hash) {
+    let shards: Vec<TransactionOutput> = (0..params.price_shards)
+        .map(|i| TransactionOutput::new(params.price_value, price.spk(&price_state(i, authority, &params.prices))))
+        .collect();
+    let price_id = covenant_id(funding.outpoint, shards.iter().enumerate().map(|(i, o)| (i as u32, o)));
+    let mut outputs: Vec<TransactionOutput> = shards
+        .into_iter()
+        .map(|mut o| {
+            o.covenant = Some(CovenantBinding { authorizing_input: 0, covenant_id: price_id });
+            o
+        })
+        .collect();
+    assert!(unbound.iter().all(|o| o.covenant.is_none()), "the price genesis authorizes only the shards");
+    outputs.extend(unbound);
+    (TxSpec { inputs: vec![Input::new(funding, Unlock::P2pk(deployer))], outputs, lock_time: 0 }, price_id)
+}
+
+/// The price-covenant reference both the name and the gap bake.
+fn price_ref(price: &Template, price_id: Hash) -> Vec<ArtifactValue> {
+    vec![
+        ArtifactValue::Bytes(price_id.as_bytes().to_vec()),
+        ArtifactValue::Bytes(price.template_hash.to_vec()),
+        ArtifactValue::Int(price.prefix.len() as i64),
+        ArtifactValue::Int(price.suffix.len() as i64),
+    ]
+}
+
+/// Compile KachatName for the price covenant `price_id` (what scripts/build.py
+/// does once params.priceCovenantId is set).
+pub fn compile_name_in(root: &Path, params: &NetParams, price: &Template, price_id: Hash) -> Template {
+    let src = std::fs::read_to_string(root.join("contracts/KachatName.sil")).unwrap();
+    let mut args = vec![
+        ArtifactValue::Bytes(ZERO32.to_vec()),
+        ArtifactValue::Bytes(ZERO32.to_vec()),
+        ArtifactValue::Bytes(ZERO32.to_vec()),
+        ArtifactValue::Int(0),
+        ArtifactValue::Int(0),
+        ArtifactValue::Int(0),
+        ArtifactValue::Int(params.bond as i64),
+        ArtifactValue::Int(params.max_years),
+        ArtifactValue::Int(params.grace_ms),
+        ArtifactValue::Int(params.renew_window_ms),
+        ArtifactValue::Int(params.period_ms),
+    ];
+    args.extend(price_ref(price, price_id));
+    compile_source(&src, &args)
+}
+
+/// Compile KachatGap for `name` and the price covenant `price_id`.
+pub fn compile_gap_in(root: &Path, params: &NetParams, name: &Template, price: &Template, price_id: Hash) -> Template {
+    let src = std::fs::read_to_string(root.join("contracts/KachatGap.sil")).unwrap();
+    let mut args = vec![
+        ArtifactValue::Bytes(ZERO32.to_vec()),
+        ArtifactValue::Bytes(FF32.to_vec()),
+        ArtifactValue::Bytes(name.template_hash.to_vec()),
+        ArtifactValue::Int(name.prefix.len() as i64),
+        ArtifactValue::Int(name.suffix.len() as i64),
+        ArtifactValue::Int(params.bond as i64),
+        ArtifactValue::Int(params.gap_value as i64),
+        ArtifactValue::Int(params.t_commit as i64),
+        ArtifactValue::Int(params.max_years),
+        ArtifactValue::Int(params.period_ms),
+    ];
+    args.extend(price_ref(price, price_id));
+    compile_source(&src, &args)
+}
+
 /// Compile KachatOffer for `registry_id` with the pinned compiler library
 /// (the same commit scripts/build.sh uses).
 pub fn compile_offer(params: &NetParams, name: &Template, registry_id: Hash) -> Template {
@@ -556,6 +740,7 @@ pub fn compile_offer(params: &NetParams, name: &Template, registry_id: Hash) -> 
 pub fn compile_offer_in(root: &Path, params: &NetParams, name: &Template, registry_id: Hash) -> Template {
     let src = std::fs::read_to_string(root.join("contracts/KachatOffer.sil")).unwrap();
     let args = vec![
+        ArtifactValue::Bytes(ZERO32.to_vec()),
         ArtifactValue::Bytes(ZERO32.to_vec()),
         ArtifactValue::Bytes(ZERO32.to_vec()),
         ArtifactValue::Int(0),
@@ -790,14 +975,14 @@ impl NameFields {
         NameFields { period_start, expires_at, ..self.clone() }
     }
 
-    /// What `extend(years)` leaves: same period start, expiry + years.
-    pub fn extended(&self, years: i64) -> Self {
-        self.with_expiry(self.expires_at + years * YEAR_MS)
+    /// What `extend(years)` leaves: same period start, expiry + years periods.
+    pub fn extended(&self, years: i64, period_ms: i64) -> Self {
+        self.with_expiry(self.expires_at + years * period_ms)
     }
 
     /// What `renew(years)` leaves: a new period from the old expiry.
-    pub fn renewed(&self, years: i64) -> Self {
-        self.with_period(self.expires_at, self.expires_at + years * YEAR_MS)
+    pub fn renewed(&self, years: i64, period_ms: i64) -> Self {
+        self.with_period(self.expires_at, self.expires_at + years * period_ms)
     }
 }
 
@@ -805,11 +990,13 @@ impl NameFields {
 pub struct OfferFields {
     pub key: [u8; 32],
     pub buyer: [u8; 32],
+    /// the name's owner the offer was made to (registry v3)
+    pub seller: [u8; 32],
     pub refund_after: i64,
 }
 
 impl OfferFields {
     pub fn encode(&self) -> Vec<u8> {
-        offer_state(&self.key, &self.buyer, self.refund_after)
+        offer_state(&self.key, &self.buyer, &self.seller, self.refund_after)
     }
 }

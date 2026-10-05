@@ -1,8 +1,11 @@
 //! One chained history through every entry, each transaction spending the
-//! real outputs of the previous ones: genesis -> register alice (2 y), bob
-//! (1 y) -> list, buy alice -> extend bob to 2 y -> offer on bob, accept ->
-//! release bob -> renew alice in her window, extend her new period -> reclaim
-//! alice -> the registry is the single genesis gap again.
+//! real outputs of the previous ones: price genesis + registry genesis ->
+//! register alice (2 periods), bob (1) -> list, buy alice -> extend bob to 2 ->
+//! offer on bob, accept -> release bob -> the authority doubles every price ->
+//! renew alice in her window (at the new price; the old one is refused),
+//! extend her new period -> reclaim alice -> the registry is the single
+//! genesis gap again, and "alice" registers anew. Every register / extend /
+//! renew reads the same price shard, chained from the price genesis.
 
 use kachat_names_harness::{
     scenarios::{self, *},
@@ -23,12 +26,62 @@ struct Gap {
     utxo: Utxo,
 }
 
-fn register_name(kit: &Kit, gap: &Gap, name: &[u8], owner: &secp256k1::Keypair, years: i64, tag: u8) -> (Built, Block) {
+/// A price shard as it stands: its index, current prices and live UTXO.
+#[derive(Clone)]
+struct Shard {
+    idx: i64,
+    prices: [u64; 5],
+    utxo: Utxo,
+}
+
+impl Shard {
+    /// Its use() input and unchanged continuation (authorized by `input_idx`).
+    fn read(&self, kit: &Kit, input_idx: u16) -> (Input, TransactionOutput) {
+        let auth = xonly(&kit.authority);
+        let input = Input::contract(self.utxo.clone(), &kit.price, price_state(self.idx, &auth, &self.prices), "use", vec![]);
+        (input, kit.price_output(self.idx, &auth, &self.prices, input_idx))
+    }
+
+    fn price_for(&self, name_len: usize) -> u64 {
+        self.prices[name_len.clamp(1, 5) - 1]
+    }
+}
+
+/// The authority changes every shard to `prices` (shard 0 leads, the others follow).
+fn update_prices(kit: &Kit, shards: &mut [Shard], prices: [u64; 5], blk: Block) {
+    let auth = kit.authority;
+    let ax = xonly(&auth);
+    let mut inputs: Vec<Input> = shards
+        .iter()
+        .map(|sh| {
+            let state = price_state(sh.idx, &ax, &sh.prices);
+            if sh.idx == 0 {
+                let mut args = vec![bytes(&ax)];
+                args.extend(prices.iter().map(|p| int(*p as i64)));
+                args.push(Arg::Sig(auth));
+                Input::contract(sh.utxo.clone(), &kit.price, state, "update", args)
+            } else {
+                Input::contract(sh.utxo.clone(), &kit.price, state, "follow", vec![])
+            }
+        })
+        .collect();
+    inputs.push(Input::new(kit.p2pk_utxo(&auth, kas(1), 99), Unlock::P2pk(auth)));
+    let mut outputs: Vec<TransactionOutput> = shards.iter().map(|sh| kit.price_output(sh.idx, &ax, &prices, sh.idx as u16)).collect();
+    outputs.push(TransactionOutput::new(kas(1) - NET_FEE, p2pk_spk(&ax)));
+    let t = ok(kit, &TxSpec { inputs, outputs, lock_time: 0 }, blk);
+    for (i, sh) in shards.iter_mut().enumerate() {
+        sh.prices = prices;
+        sh.utxo = out(&t, i as u32, blk.daa);
+    }
+}
+
+fn register_name(kit: &Kit, gap: &Gap, shard: &mut Shard, name: &[u8], owner: &secp256k1::Keypair, years: i64, tag: u8) -> (Built, Block) {
     let p = &kit.params;
     let ox = xonly(owner);
     let salt = [tag; 32];
     let key = name_key(name);
-    let price = p.price_for(name.len()) * years as u64;
+    let price = shard.price_for(name.len()) * years as u64;
+    let (price_in, price_out) = shard.read(kit, 2);
     let redeem = commit_redeem(&commitment(name, &ox, &salt), &ox);
     let commit = Utxo::new(
         TransactionOutpoint::new(TransactionId::from_bytes([tag; 32]), 0),
@@ -44,37 +97,53 @@ fn register_name(kit: &Kit, gap: &Gap, name: &[u8], owner: &secp256k1::Keypair, 
                 &kit.gap,
                 gap_state(&gap.lo, &gap.hi),
                 "register",
-                vec![bytes(name), bytes(&ox), bytes(&salt), int(NOW_MS), int(years), bytes(&kit.name.prefix), bytes(&kit.name.suffix)],
+                vec![bytes(name), bytes(&ox), bytes(&salt), int(NOW_MS), int(years), bytes(&kit.name.prefix), bytes(&kit.name.suffix), int(2)],
             ),
             commit_in,
+            price_in,
             Input::new(funding, Unlock::P2pk(*owner)),
         ],
         outputs: vec![
             kit.gap_output(&gap.lo, &key, 0),
             kit.gap_output(&key, &gap.hi, 0),
-            kit.name_output(&NameFields::new(name, &ox, 0, NOW_MS, NOW_MS + years * YEAR_MS), 0),
+            kit.name_output(&NameFields::new(name, &ox, 0, NOW_MS, NOW_MS + years * PERIOD), 0),
+            price_out,
         ],
         lock_time: NOW_MS as u64,
     };
     let change = spec.total_in() - spec.total_out() - price - NET_FEE;
     spec.outputs.push(TransactionOutput::new(change, p2pk_spk(&ox)));
     let block = Block { daa: (COMMIT_DAA + p.t_commit).max(gap.utxo.entry.block_daa_score + 1), time_ms: NOW_MS as u64 + 1 };
-    (ok(kit, &spec, block), block)
+    let built = ok(kit, &spec, block);
+    shard.utxo = out(&built, 3, block.daa);
+    (built, block)
 }
 
-/// `payer` pays `years` of the tier price for `entry` (extend or renew) on a
-/// name: [name, payer funding] -> [continuation `next`, payer change].
+/// `payer` pays `years` of `shard`'s price for `entry` (extend or renew) on a
+/// name: [name, shard (use), payer funding] -> [continuation `next`, shard, payer change].
+/// Spend the result with `paid_ok` so the shard moves on.
 #[allow(clippy::too_many_arguments)]
-fn paid(kit: &Kit, f: &NameFields, utxo: &Utxo, entry: &str, years: i64, next: NameFields, lock_time: u64, payer: &secp256k1::Keypair, tag: u8) -> TxSpec {
-    let due = kit.params.renew_price_for(scenarios::name_len(&f.name)) * years as u64;
+fn paid(kit: &Kit, shard: &Shard, f: &NameFields, utxo: &Utxo, entry: &str, years: i64, next: NameFields, lock_time: u64, payer: &secp256k1::Keypair, tag: u8) -> TxSpec {
+    let due = shard.price_for(scenarios::name_len(&f.name)) * years as u64;
     let funding = kit.p2pk_utxo(payer, due + kas(2), tag);
+    let (price_in, price_out) = shard.read(kit, 1);
     let mut spec = TxSpec {
-        inputs: vec![Input::contract(utxo.clone(), &kit.name, f.encode(), entry, vec![int(years)]), Input::new(funding, Unlock::P2pk(*payer))],
-        outputs: vec![kit.name_output(&next, 0)],
+        inputs: vec![
+            Input::contract(utxo.clone(), &kit.name, f.encode(), entry, vec![int(years), int(1)]),
+            price_in,
+            Input::new(funding, Unlock::P2pk(*payer)),
+        ],
+        outputs: vec![kit.name_output(&next, 0), price_out],
         lock_time,
     };
     spec.outputs.push(TransactionOutput::new(spec.total_in() - spec.total_out() - due - NET_FEE, p2pk_spk(&xonly(payer))));
     spec
+}
+
+fn paid_ok(kit: &Kit, shard: &mut Shard, spec: &TxSpec, blk: Block) -> Built {
+    let t = ok(kit, spec, blk);
+    shard.utxo = out(&t, 1, blk.daa);
+    t
 }
 
 #[test]
@@ -88,13 +157,18 @@ fn full_lifecycle_returns_the_registry_to_its_genesis_gap() {
     let reclaimer = keypair(6);
 
     let genesis = Gap { lo: ZERO32, hi: FF32, utxo: out(&kit.genesis_tx, 0, 1_000) };
+    let mut shards: Vec<Shard> = (0..kit.params.price_shards)
+        .map(|i| Shard { idx: i, prices: kit.params.prices, utxo: out(&kit.price_genesis_tx, i as u32, 1_000) })
+        .collect();
+    // every paid operation below reads shard 3
+    let mut sh = shards[3].clone();
 
-    // register alice (2 years) in the genesis gap
-    let (reg_a, b0) = register_name(&kit, &genesis, b"alice", &alice_owner, 2, 50);
+    // register alice (2 periods) in the genesis gap
+    let (reg_a, b0) = register_name(&kit, &genesis, &mut sh, b"alice", &alice_owner, 2, 50);
     let ka = name_key(b"alice");
     let below_a = Gap { lo: ZERO32, hi: ka, utxo: out(&reg_a, 0, b0.daa) };
     let above_a = Gap { lo: ka, hi: FF32, utxo: out(&reg_a, 1, b0.daa) };
-    let mut alice = NameFields::new(b"alice", &xonly(&alice_owner), 0, NOW_MS, NOW_MS + 2 * YEAR_MS);
+    let mut alice = NameFields::new(b"alice", &xonly(&alice_owner), 0, NOW_MS, NOW_MS + 2 * PERIOD);
     let mut alice_utxo = out(&reg_a, 2, b0.daa);
 
     // register bob in whichever gap holds its key
@@ -105,10 +179,10 @@ fn full_lifecycle_returns_the_registry_to_its_genesis_gap() {
     } else {
         (Gap { lo: ZERO32, hi: ka, utxo: out(&reg_a, 0, b0.daa) }, host)
     };
-    let (reg_b, b1) = register_name(&kit, &host, b"bob", &bob_owner, 1, 60);
+    let (reg_b, b1) = register_name(&kit, &host, &mut sh, b"bob", &bob_owner, 1, 60);
     let gap_lo_b = Gap { lo: host.lo, hi: kb, utxo: out(&reg_b, 0, b1.daa) };
     let gap_b_hi = Gap { lo: kb, hi: host.hi, utxo: out(&reg_b, 1, b1.daa) };
-    let mut bob = NameFields::new(b"bob", &xonly(&bob_owner), 0, NOW_MS, NOW_MS + YEAR_MS);
+    let mut bob = NameFields::new(b"bob", &xonly(&bob_owner), 0, NOW_MS, NOW_MS + PERIOD);
     let mut bob_utxo = out(&reg_b, 2, b1.daa);
 
     let blk = active_block();
@@ -145,20 +219,21 @@ fn full_lifecycle_returns_the_registry_to_its_genesis_gap() {
     alice = alice.with_owner(&bx);
     alice_utxo = out(&t, 0, blk.daa);
 
-    // a gifter extends bob from 1 to 2 years (the most a period may hold)
-    let t = ok(&kit, &paid(&kit, &bob, &bob_utxo, "extend", 1, bob.extended(1), 0, &gifter, 72), blk);
-    bob = bob.extended(1);
+    // a gifter extends bob from 1 to 2 periods (the most a name may hold)
+    let spec = paid(&kit, &sh, &bob, &bob_utxo, "extend", 1, bob.extended(1, PERIOD), 0, &gifter, 72);
+    let t = paid_ok(&kit, &mut sh, &spec, blk);
+    bob = bob.extended(1, PERIOD);
     bob_utxo = out(&t, 0, blk.daa);
-    assert_eq!((bob.period_start, bob.expires_at), (NOW_MS, NOW_MS + 2 * YEAR_MS));
+    assert_eq!((bob.period_start, bob.expires_at), (NOW_MS, NOW_MS + 2 * PERIOD));
 
     // carol offers 40 KAS for bob; bob's owner accepts (the period travels with the name)
-    let offer = OfferFields { key: kb, buyer: xonly(&carol), refund_after: OFFER_REFUND_AFTER };
+    let offer = OfferFields { key: kb, buyer: xonly(&carol), seller: bob.owner, refund_after: OFFER_REFUND_AFTER };
     let ov = kas(40);
     let offer_utxo = kit.offer_utxo(&offer, ov, 73);
     let spec = TxSpec {
         inputs: vec![
             Input::contract(bob_utxo.clone(), &kit.name, bob.encode(), "transfer", vec![bytes(&offer.buyer), Arg::Sig(bob_owner)]),
-            Input::contract(offer_utxo, &kit.offer, offer.encode(), "accept", vec![int(0)]),
+            Input::contract(offer_utxo, &kit.offer, offer.encode(), "accept", vec![int(0), Arg::Sig(bob_owner)]),
         ],
         outputs: vec![kit.name_output(&bob.with_owner(&offer.buyer), 0), TransactionOutput::new(ov - NET_FEE, p2pk_spk(&bob.owner))],
         lock_time: 0,
@@ -181,25 +256,40 @@ fn full_lifecycle_returns_the_registry_to_its_genesis_gap() {
     let t = ok(&kit, &spec, blk);
     let host_again = Gap { lo: host.lo, hi: host.hi, utxo: out(&t, 0, blk.daa) };
 
-    // alice (2 years, now the buyer's): extending is refused, she is paid 2 years ahead
-    let refused = paid(&kit, &alice, &alice_utxo, "extend", 1, alice.extended(1), 0, &gifter, 74);
+    // alice (2 periods, now the buyer's): extending is refused, she is paid 2 periods ahead
+    let refused = paid(&kit, &sh, &alice, &alice_utxo, "extend", 1, alice.extended(1, PERIOD), 0, &gifter, 74);
     input_fails(&kit, &refused, blk, 0);
-    // once the renewal window opens (10 days before expiry) a gifter renews her
-    // for 1 year: the new period starts at the old expiry
+
+    // the authority doubles every price, at once, through all the shards
+    shards[3] = sh.clone();
+    let doubled = kit.params.prices.map(|p| p * 2);
+    update_prices(&kit, &mut shards, doubled, blk);
+    sh = shards[3].clone();
+    assert_eq!(sh.prices, doubled);
+
+    // once the renewal window opens (one period before expiry on the testnet
+    // clock) a gifter renews her for 1 period: the new period starts at the old
+    // expiry, at the new price - the old price is refused
     let opens = alice.expires_at - kit.params.renew_window_ms;
     let wblk = Block { daa: blk.daa + 50_000_000, time_ms: opens as u64 + 1 };
-    let t = ok(&kit, &paid(&kit, &alice, &alice_utxo, "renew", 1, alice.renewed(1), opens as u64, &gifter, 75), wblk);
-    alice = alice.renewed(1);
+    let mut cheap = paid(&kit, &sh, &alice, &alice_utxo, "renew", 1, alice.renewed(1, PERIOD), opens as u64, &gifter, 75);
+    let half = kit.params.price_for(5);
+    cheap.outputs.last_mut().unwrap().value += half; // pays only the old price
+    input_fails(&kit, &cheap, wblk, 0);
+    let spec = paid(&kit, &sh, &alice, &alice_utxo, "renew", 1, alice.renewed(1, PERIOD), opens as u64, &gifter, 75);
+    let t = paid_ok(&kit, &mut sh, &spec, wblk);
+    alice = alice.renewed(1, PERIOD);
     alice_utxo = out(&t, 0, wblk.daa);
-    assert_eq!((alice.period_start, alice.expires_at), (NOW_MS + 2 * YEAR_MS, NOW_MS + 3 * YEAR_MS));
-    // a second renewal right away is refused (the window moved a year on)
-    let again = paid(&kit, &alice, &alice_utxo, "renew", 1, alice.renewed(1), opens as u64, &gifter, 76);
+    assert_eq!((alice.period_start, alice.expires_at), (NOW_MS + 2 * PERIOD, NOW_MS + 3 * PERIOD));
+    // a second renewal right away is refused (the window moved a period on)
+    let again = paid(&kit, &sh, &alice, &alice_utxo, "renew", 1, alice.renewed(1, PERIOD), opens as u64, &gifter, 76);
     input_fails(&kit, &again, wblk, 0);
-    // but the new period can be extended to 2 years
-    let t = ok(&kit, &paid(&kit, &alice, &alice_utxo, "extend", 1, alice.extended(1), 0, &gifter, 77), wblk);
-    alice = alice.extended(1);
+    // but the new period can be extended to 2 periods
+    let spec = paid(&kit, &sh, &alice, &alice_utxo, "extend", 1, alice.extended(1, PERIOD), 0, &gifter, 77);
+    let t = paid_ok(&kit, &mut sh, &spec, wblk);
+    alice = alice.extended(1, PERIOD);
     alice_utxo = out(&t, 0, wblk.daa);
-    assert_eq!((alice.period_start, alice.expires_at), (NOW_MS + 2 * YEAR_MS, NOW_MS + 4 * YEAR_MS));
+    assert_eq!((alice.period_start, alice.expires_at), (NOW_MS + 2 * PERIOD, NOW_MS + 4 * PERIOD));
     assert_eq!(alice.owner, bx);
 
     // alice lapses; after expiresAt + grace anyone reclaims it
@@ -226,5 +316,5 @@ fn full_lifecycle_returns_the_registry_to_its_genesis_gap() {
 
     // and "alice" can be registered again from it
     let fresh = Gap { lo: ZERO32, hi: FF32, utxo: out(&t, 0, late.daa) };
-    let (_again, _) = register_name(&kit, &fresh, b"alice", &carol, 1, 80);
+    let (_again, _) = register_name(&kit, &fresh, &mut sh, b"alice", &carol, 1, 80);
 }

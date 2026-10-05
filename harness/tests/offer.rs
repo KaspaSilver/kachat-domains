@@ -21,13 +21,13 @@ fn owner_accepts_an_offer() {
 fn accept_works_on_an_expired_name_and_keeps_its_expiry() {
     let kit = Kit::new();
     let mut o = offer_case(&kit, b"alice", V);
-    o.n.fields = o.n.fields.with_expiry(NOW_MS - 2 * YEAR_MS);
+    o.n.fields = o.n.fields.with_expiry(NOW_MS - 2 * PERIOD);
     o.n.utxo = kit.name_utxo(&o.n.fields, 20);
     let spec = accept(&kit, &o);
     ok(&kit, &spec, active_block());
     // and refuses a continuation that changes the expiry
     let mut spec = accept(&kit, &o);
-    spec.outputs[0] = kit.name_output(&o.n.fields.with_owner(&o.fields.buyer).with_expiry(NOW_MS + YEAR_MS), 0);
+    spec.outputs[0] = kit.name_output(&o.n.fields.with_owner(&o.fields.buyer).with_expiry(NOW_MS + PERIOD), 0);
     let built = kit.build(&spec);
     let res = built.run_inputs();
     assert!(res[0].is_err() && res[1].is_err(), "{res:?}");
@@ -40,14 +40,14 @@ fn accept_keeps_the_paid_period() {
     // by the offer (and by the name's transfer)
     let kit = Kit::new();
     let mut o = offer_case(&kit, b"alice", V);
-    o.n.fields = o.n.fields.renewed(1);
+    o.n.fields = o.n.fields.renewed(1, PERIOD);
     o.n.utxo = kit.name_utxo(&o.n.fields, 20);
     let spec = accept(&kit, &o);
     let built = ok(&kit, &spec, active_block());
     let cont = o.n.fields.with_owner(&o.fields.buyer);
-    assert_eq!((cont.period_start, cont.expires_at), (NOW_MS + YEAR_MS, NOW_MS + 2 * YEAR_MS));
+    assert_eq!((cont.period_start, cont.expires_at), (NOW_MS + PERIOD, NOW_MS + 2 * PERIOD));
     assert_eq!(built.tx.outputs[0].script_public_key, kit.name.spk(&cont.encode()));
-    for start in [NOW_MS, NOW_MS + YEAR_MS - 1, NOW_MS + YEAR_MS + 1, cont.expires_at] {
+    for start in [NOW_MS, NOW_MS + PERIOD - 1, NOW_MS + PERIOD + 1, cont.expires_at] {
         let mut spec = accept(&kit, &o);
         spec.outputs[0] = kit.name_output(&NameFields { period_start: start, ..cont.clone() }, 0);
         let built = kit.build(&spec);
@@ -59,9 +59,9 @@ fn accept_keeps_the_paid_period() {
 
 #[test]
 fn accept_with_a_matched_listing_refuses_a_moved_period() {
-    // a listed name matched with an offer by a third party (name.buy +
-    // offer.accept): the offer itself refuses a continuation whose
-    // periodStart moved
+    // the seller settles their listed name against an offer (name.buy +
+    // offer.accept, the seller signing the offer): the offer itself refuses a
+    // continuation whose periodStart moved
     let kit = Kit::new();
     let mut o = offer_case(&kit, b"alice", V);
     o.n.fields = o.n.fields.with_price(V as i64 - kit.params.offer_max_fee as i64);
@@ -70,7 +70,7 @@ fn accept_with_a_matched_listing_refuses_a_moved_period() {
     let spec = TxSpec {
         inputs: vec![
             Input::contract(o.n.utxo.clone(), &kit.name, o.n.fields.encode(), "buy", vec![bytes(&o.fields.buyer)]),
-            offer_input(&kit, &o, "accept", vec![int(0)]),
+            offer_input(&kit, &o, "accept", vec![int(0), Arg::Sig(o.n.owner)]),
         ],
         outputs: vec![
             kit.name_output(&o.n.fields.with_owner(&o.fields.buyer), 0),
@@ -80,7 +80,7 @@ fn accept_with_a_matched_listing_refuses_a_moved_period() {
     };
     ok(&kit, &spec, active_block());
     let mut forged = spec.clone();
-    forged.outputs[0] = kit.name_output(&NameFields { period_start: NOW_MS + YEAR_MS, ..o.n.fields.with_owner(&o.fields.buyer) }, 0);
+    forged.outputs[0] = kit.name_output(&NameFields { period_start: NOW_MS + PERIOD, ..o.n.fields.with_owner(&o.fields.buyer) }, 0);
     let built = kit.build(&forged);
     let res = built.run_inputs();
     assert!(res[1].is_err(), "the offer must refuse a moved periodStart: {res:?}");
@@ -129,7 +129,7 @@ fn accept_rejects_a_different_name() {
     let kit = Kit::new();
     let mut o = offer_case(&kit, b"alice", V);
     // the offer wants "alice", the owner settles it with "bobby"
-    o.n.fields = NameFields::new(b"bobby", &o.n.fields.owner, 0, NOW_MS, NOW_MS + YEAR_MS);
+    o.n.fields = NameFields::new(b"bobby", &o.n.fields.owner, 0, NOW_MS, NOW_MS + PERIOD);
     o.n.utxo = kit.name_utxo(&o.n.fields, 20);
     offer_fails(&kit, &accept(&kit, &o), active_block(), 1);
 }
@@ -170,7 +170,7 @@ fn one_name_cannot_settle_two_offers() {
     let o = offer_case(&kit, b"alice", V);
     let o2 = OfferCase { utxo: kit.offer_utxo(&o.fields, V, 41), ..offer_case(&kit, b"alice", V) };
     let mut spec = accept(&kit, &o);
-    spec.inputs.push(offer_input(&kit, &o2, "accept", vec![int(0)]));
+    spec.inputs.push(offer_input(&kit, &o2, "accept", vec![int(0), Arg::Sig(o.n.owner)]));
     spec.outputs.push(TransactionOutput::new(V - NET_FEE, p2pk_spk(&o.n.fields.owner)));
     let built = kit.build(&spec);
     let res = built.run_inputs();
@@ -199,20 +199,18 @@ fn accept_rejects_the_offer_away_from_its_name() {
 }
 
 #[test]
-fn a_listed_name_and_an_offer_settle_together_without_loss() {
-    // Anyone may run buy(newOwner = buyer) next to the buyer's offer. The one
-    // payout satisfies both, so the seller gets max(price, V - maxFee) and the
-    // buyer gets the name for the amount they offered; the matcher keeps at
-    // most maxFee. Documented behaviour, not an attack.
+fn a_third_party_cannot_match_a_listing_with_an_offer() {
+    // v2 let anyone run buy(newOwner = buyer) next to the buyer's offer and keep up to
+    // maxFee. v3: accept needs the seller's signature, so a matcher can't settle it...
     let kit = Kit::new();
     let mut o = offer_case(&kit, b"alice", V);
     o.n.fields = o.n.fields.with_price((V / 2) as i64);
     o.n.utxo = kit.name_utxo(&o.n.fields, 20);
     let matcher = keypair(5);
-    let spec = TxSpec {
+    let matched = |signer: secp256k1::Keypair| TxSpec {
         inputs: vec![
             Input::contract(o.n.utxo.clone(), &kit.name, o.n.fields.encode(), "buy", vec![bytes(&o.fields.buyer)]),
-            offer_input(&kit, &o, "accept", vec![int(0)]),
+            offer_input(&kit, &o, "accept", vec![int(0), Arg::Sig(signer)]),
         ],
         outputs: vec![
             kit.name_output(&o.n.fields.with_owner(&o.fields.buyer), 0),
@@ -221,7 +219,91 @@ fn a_listed_name_and_an_offer_settle_together_without_loss() {
         ],
         lock_time: 0,
     };
+    offer_fails(&kit, &matched(matcher), active_block(), 1);
+    // ...while the seller still may (it is their listing and their offer to take)
+    ok(&kit, &matched(o.n.owner), active_block());
+}
+
+#[test]
+fn accept_needs_the_sellers_signature() {
+    let kit = Kit::new();
+    let o = offer_case(&kit, b"alice", V);
+    ok(&kit, &accept(&kit, &o), active_block());
+    // someone else's key, the buyer's key, a non-ALL sighash
+    for arg in [Arg::Sig(keypair(9)), Arg::Sig(o.buyer), Arg::SigWithType(o.n.owner, 0x81), Arg::SigWithType(o.n.owner, 0x02)] {
+        let mut spec = accept(&kit, &o);
+        spec.inputs[1].args_mut()[1] = arg;
+        offer_fails(&kit, &spec, active_block(), 1);
+    }
+}
+
+#[test]
+fn an_offer_made_to_an_earlier_owner_cannot_be_accepted() {
+    // the name changed hands after the offer: neither the new owner nor the old
+    // seller can take it - every earlier offer ends with the change of owner
+    let kit = Kit::new();
+    let mut o = offer_case(&kit, b"alice", V);
+    let new_owner = keypair(6);
+    o.n.fields = o.n.fields.with_owner(&xonly(&new_owner));
+    o.n.utxo = kit.name_utxo(&o.n.fields, 20);
+    o.n.owner = new_owner;
+    // the new owner transfers and signs the offer
+    let spec = accept(&kit, &o);
+    offer_fails(&kit, &spec, active_block(), 1);
+    // the new owner transfers, the old seller signs the offer
+    let mut spec = accept(&kit, &o);
+    spec.inputs[1].args_mut()[1] = Arg::Sig(keypair(1));
+    offer_fails(&kit, &spec, active_block(), 1);
+}
+
+// ---------------------------------------------------------------- decline
+
+#[test]
+fn the_seller_declines_any_time() {
+    let kit = Kit::new();
+    let o = offer_case(&kit, b"alice", V);
+    ok(&kit, &decline(&kit, &o), active_block());
+    // the fee may come out of the offer, up to maxFee
+    let mut spec = decline(&kit, &o);
+    spec.outputs[0].value = V - kit.params.offer_max_fee;
     ok(&kit, &spec, active_block());
+}
+
+#[test]
+fn decline_rejects_anyone_but_the_seller() {
+    let kit = Kit::new();
+    let o = offer_case(&kit, b"alice", V);
+    for arg in [Arg::Sig(keypair(9)), Arg::Sig(o.buyer), Arg::SigWithType(o.n.owner, 0x81)] {
+        let mut spec = decline(&kit, &o);
+        spec.inputs[0].args_mut()[0] = arg;
+        offer_fails(&kit, &spec, active_block(), 0);
+    }
+}
+
+#[test]
+fn decline_pays_the_buyer_alone_and_in_full() {
+    let kit = Kit::new();
+    let o = offer_case(&kit, b"alice", V);
+    // to someone else (the seller)
+    let mut spec = decline(&kit, &o);
+    spec.outputs[0] = TransactionOutput::new(V - NET_FEE, p2pk_spk(&o.n.fields.owner));
+    offer_fails(&kit, &spec, active_block(), 0);
+    // more than maxFee kept back
+    let mut spec = decline(&kit, &o);
+    spec.outputs[0].value = V - kit.params.offer_max_fee - 1;
+    offer_fails(&kit, &spec, active_block(), 0);
+    // a second output (the seller skims part of it)
+    let mut spec = decline(&kit, &o);
+    spec.outputs[0].value = V - kit.params.offer_max_fee;
+    spec.outputs.push(TransactionOutput::new(1_000, p2pk_spk(&o.n.fields.owner)));
+    spec.outputs[0].value -= 1_000;
+    offer_fails(&kit, &spec, active_block(), 0);
+    // not alone: another input pays the buyer's output
+    let mut spec = decline(&kit, &o);
+    let seller = o.n.owner;
+    spec.inputs.push(Input::new(kit.p2pk_utxo(&seller, kas(1), 44), Unlock::P2pk(seller)));
+    spec.outputs.push(TransactionOutput::new(kas(1) - NET_FEE, p2pk_spk(&xonly(&seller))));
+    offer_fails(&kit, &spec, active_block(), 0);
 }
 
 // ---------------------------------------------------------------- withdraw
@@ -314,7 +396,7 @@ fn a_refund_cannot_pay_a_listed_names_seller() {
     let kit = Kit::new();
     let mut n = name_case(&kit, b"alice", (V / 2) as i64);
     n.utxo = kit.name_utxo(&n.fields, 20);
-    let seller_offer = OfferFields { key: name_key(b"zzzzz"), buyer: n.fields.owner, refund_after: OFFER_REFUND_AFTER };
+    let seller_offer = OfferFields { key: name_key(b"zzzzz"), buyer: n.fields.owner, seller: xonly(&keypair(8)), refund_after: OFFER_REFUND_AFTER };
     let attacker = keypair(9);
     let spec = TxSpec {
         inputs: vec![

@@ -13,9 +13,12 @@ pragma silverscript ^0.1.0;
 //   bond      exact value of a name UTXO
 //   gapValue  exact value of every gap UTXO
 //   tCommit   minimum age, in DAA score, of the commit UTXO at registration
-//   maxYears  most years a registration may prepay
-//   price1 .. price5  registration price per year (miner fee) for names of
-//                     1, 2, 3, 4 and 5+ bytes, in sompi
+//   maxYears  most periods a registration may prepay
+//   periodMs  length of one paid period (registry v3: a year on mainnet,
+//             10 minutes on the testnet short clock)
+//   priceCovId, priceTemplateHash, pricePrefixLen, priceSuffixLen
+//             the price record (KachatPrice): registry v3 reads the price per
+//             period from a shard spent alongside, instead of baking it
 //
 // Entries:
 //   register  @0, alone: splits (lo, hi) into (lo, key) and (key, hi) and
@@ -32,11 +35,11 @@ contract KachatGap(
     int gapValue,
     int tCommit,
     int maxYears,
-    int price1,
-    int price2,
-    int price3,
-    int price4,
-    int price5
+    int periodMs,
+    byte[32] priceCovId,
+    byte[32] priceTemplateHash,
+    int pricePrefixLen,
+    int priceSuffixLen
 ) {
     // Transactions that register a name may have at most this many inputs
     // and outputs (the miner-fee sum is an unrolled loop).
@@ -46,7 +49,6 @@ contract KachatGap(
     // overflow a script integer (8 * 1e18 < 2^63). 1e18 sompi = 10 billion KAS,
     // a third of the total supply.
     int constant MAX_IO_VALUE = 1000000000000000000;
-    int constant YEAR_MS = 31536000000;
     // `now` (unix ms) above this is refused before any arithmetic: year ~33658.
     int constant MAX_NOW = 1000000000000000;
 
@@ -58,6 +60,17 @@ contract KachatGap(
         int price;
         int periodStart;
         int expiresAt;
+    }
+
+    // Layout of the KachatPrice runtime state (must match KachatPrice.sil).
+    struct PriceState {
+        int shard;
+        byte[32] authority;
+        int p1;
+        int p2;
+        int p3;
+        int p4;
+        int p5;
     }
 
     byte[32] lo = initLo;
@@ -90,16 +103,23 @@ contract KachatGap(
         require(n[n.length - 1] != 0x2d, "no trailing hyphen");
     }
 
-    function priceFor(int len): int {
-        int p = price5;
+    // The price per period for a name of `len` bytes, from the price shard at
+    // input `priceIdx`: it must carry the price covenant id (so it is a real
+    // shard, not a look-alike output anyone could make) and the price template.
+    function priceFor(int priceIdx, int len): int {
+        require(priceIdx >= 0, "price index");
+        require(priceIdx < tx.inputs.length, "price index");
+        require(OpInputCovenantId(priceIdx) == priceCovId, "price record");
+        PriceState ps = readInputStateWithTemplate(priceIdx, pricePrefixLen, priceSuffixLen, priceTemplateHash);
+        int p = ps.p5;
         if (len == 1) {
-            p = price1;
+            p = ps.p1;
         } else if (len == 2) {
-            p = price2;
+            p = ps.p2;
         } else if (len == 3) {
-            p = price3;
+            p = ps.p3;
         } else if (len == 4) {
-            p = price4;
+            p = ps.p4;
         }
         return p;
     }
@@ -134,20 +154,21 @@ contract KachatGap(
         require(OpCovOutputIdx(covId, 0) == 0, "registry output 0");
     }
 
-    // Register `name` for `ownerKey`, prepaying `years` (1..maxYears).
+    // Register `name` for `ownerKey`, prepaying `years` periods (1..maxYears).
     //   in  0  this gap (lo, hi), lo < blake3(name) < hi
     //   in  1  the commit UTXO: P2SH(0x20 c 0x75 0x20 ownerKey 0xac),
     //          c = blake3("kachat-commit:v1" || name || ownerKey || salt),
     //          spent with a relative sequence lock >= tCommit
-    //   in  2.. funding
+    //   in  priceIdx  a price shard (runs use(), comes back unchanged)
+    //   in  others    funding
     //   out 0  gap (lo, key)  = gapValue
     //   out 1  gap (key, hi)  = gapValue
     //   out 2  name (key, padded name, ownerKey, price 0, periodStart = now,
-    //          expiresAt = now + years * YEAR_MS) = bond
-    //   out 3.. change
+    //          expiresAt = now + years * periodMs) = bond
+    //   out 3.. the shard's continuation, change
     //   tx.lockTime (timestamp domain) >= now
-    //   inputs - outputs >= price(len(name)) * years
-    entry register(byte[] name, byte[32] ownerKey, byte[32] salt, int now, int years, byte[] namePrefix, byte[] nameSuffix) {
+    //   inputs - outputs >= the shard's price(len(name)) * years
+    entry register(byte[] name, byte[32] ownerKey, byte[32] salt, int now, int years, byte[] namePrefix, byte[] nameSuffix, int priceIdx) {
         require(this.activeInputIndex == 0, "gap at input 0");
         byte[32] covId = OpInputCovenantId(0);
         require(OpCovInputCount(covId) == 1, "one registry input");
@@ -186,7 +207,7 @@ contract KachatGap(
         require(years <= maxYears, "years <= maxYears");
         require(now <= MAX_NOW, "now range");
         require(tx.time >= temporal(now));
-        int expiry = now + years * YEAR_MS;
+        int expiry = now + years * periodMs;
 
         // Outputs.
         require(tx.outputs[0].value == gapValue, "lower gap value");
@@ -205,7 +226,7 @@ contract KachatGap(
         );
 
         // The price is left to the miner.
-        require(minerFee() >= priceFor(len) * years, "price paid as miner fee");
+        require(minerFee() >= priceFor(priceIdx, len) * years, "price paid as miner fee");
     }
 
     // Exit, seat 0: this gap (lo, key), the name at key (seat 1, runs

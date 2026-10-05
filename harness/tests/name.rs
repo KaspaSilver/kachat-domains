@@ -34,7 +34,7 @@ fn transfer_clears_a_listing() {
 fn transfer_works_after_expiry() {
     let kit = Kit::new();
     let n = name_case(&kit, b"alice", 0);
-    let late = Block { daa: COMMIT_DAA + 1_000_000_000, time_ms: (n.fields.expires_at + 10 * YEAR_MS) as u64 };
+    let late = Block { daa: COMMIT_DAA + 1_000_000_000, time_ms: (n.fields.expires_at + 10 * PERIOD) as u64 };
     ok(&kit, &transfer(&kit, &n, &xonly(&keypair(7))), late);
 }
 
@@ -76,7 +76,7 @@ fn transfer_rejects_a_changed_key_name_or_expiry() {
     for bad in [
         NameFields { key: name_key(b"bob"), ..next.clone() },
         NameFields { name: pad_name(b"bob"), ..next.clone() },
-        next.with_expiry(next.expires_at + YEAR_MS),
+        next.with_expiry(next.expires_at + PERIOD),
         next.with_expiry(next.expires_at - 1),
     ] {
         let mut spec = transfer(&kit, &n, &to);
@@ -132,9 +132,9 @@ fn names_cannot_be_batched() {
     let kit = Kit::new();
     let a = name_case(&kit, b"alice", 0);
     let b = NameCase {
-        fields: NameFields::new(b"bob", &xonly(&a.owner), 0, NOW_MS, NOW_MS + YEAR_MS),
+        fields: NameFields::new(b"bob", &xonly(&a.owner), 0, NOW_MS, NOW_MS + PERIOD),
         owner: a.owner,
-        utxo: kit.name_utxo(&NameFields::new(b"bob", &xonly(&a.owner), 0, NOW_MS, NOW_MS + YEAR_MS), 24),
+        utxo: kit.name_utxo(&NameFields::new(b"bob", &xonly(&a.owner), 0, NOW_MS, NOW_MS + PERIOD), 24),
     };
     let to = xonly(&keypair(7));
     let mut spec = transfer(&kit, &a, &to);
@@ -259,7 +259,7 @@ fn two_buys_cannot_share_one_payment() {
     // continuation" checks.
     let kit = Kit::new();
     let a = name_case(&kit, b"alice", PRICE);
-    let bf = NameFields::new(b"bobby", &a.fields.owner, PRICE, NOW_MS, NOW_MS + YEAR_MS);
+    let bf = NameFields::new(b"bobby", &a.fields.owner, PRICE, NOW_MS, NOW_MS + PERIOD);
     let b_utxo = kit.name_utxo(&bf, 25);
     let buyer = keypair(2);
     let bx = xonly(&buyer);
@@ -316,15 +316,15 @@ fn transfer_list_and_buy_keep_the_paid_period() {
     let kit = Kit::new();
     let n = name_case(&kit, b"alice", 0);
     // a renewed name: periodStart is no longer the registration time
-    let n = n.with_fields(&kit, n.fields.renewed(1));
-    assert_eq!((n.fields.period_start, n.fields.expires_at), (NOW_MS + YEAR_MS, NOW_MS + 2 * YEAR_MS));
+    let n = n.with_fields(&kit, n.fields.renewed(1, PERIOD));
+    assert_eq!((n.fields.period_start, n.fields.expires_at), (NOW_MS + PERIOD, NOW_MS + 2 * PERIOD));
     let to = xonly(&keypair(7));
     ok(&kit, &transfer(&kit, &n, &to), active_block());
     ok(&kit, &list(&kit, &n, 10), active_block());
     let listed = n.with_fields(&kit, n.fields.with_price(PRICE));
     ok(&kit, &buy(&kit, &listed), active_block());
     // a continuation that moves periodStart either way is refused by each
-    for start in [n.fields.period_start - YEAR_MS, n.fields.period_start + 1, n.fields.expires_at] {
+    for start in [n.fields.period_start - PERIOD, n.fields.period_start + 1, n.fields.expires_at] {
         let mut spec = transfer(&kit, &n, &to);
         spec.outputs[0] = kit.name_output(&NameFields { period_start: start, ..n.fields.with_owner(&to) }, 0);
         name_fails(&kit, &spec);
@@ -346,8 +346,8 @@ fn extend_one_year_to_two() {
     let spec = extend(&kit, &n, 1);
     assert_eq!(spec.lock_time, 0);
     ok(&kit, &spec, active_block());
-    let next = n.fields.extended(1);
-    assert_eq!((next.period_start, next.expires_at), (NOW_MS, NOW_MS + 2 * YEAR_MS));
+    let next = n.fields.extended(1, PERIOD);
+    assert_eq!((next.period_start, next.expires_at), (NOW_MS, NOW_MS + 2 * PERIOD));
 }
 
 #[test]
@@ -358,15 +358,15 @@ fn extend_past_period_start_plus_max_years_fails() {
     let spec = extend(&kit, &n, 2);
     name_fails(&kit, &spec);
     // a 2-year registration cannot be extended at all
-    let two = n.with_fields(&kit, NameFields { expires_at: NOW_MS + 2 * YEAR_MS, ..n.fields.clone() });
+    let two = n.with_fields(&kit, NameFields { expires_at: NOW_MS + 2 * PERIOD, ..n.fields.clone() });
     name_fails(&kit, &extend(&kit, &two, 1));
     // one millisecond over the cap is refused; exactly at it passes
-    let almost = n.with_fields(&kit, n.fields.with_expiry(NOW_MS + YEAR_MS + 1));
+    let almost = n.with_fields(&kit, n.fields.with_expiry(NOW_MS + PERIOD + 1));
     name_fails(&kit, &extend(&kit, &almost, 1));
-    let exact = n.with_fields(&kit, n.fields.with_expiry(NOW_MS + YEAR_MS));
+    let exact = n.with_fields(&kit, n.fields.with_expiry(NOW_MS + PERIOD));
     ok(&kit, &extend(&kit, &exact, 1), active_block());
     // and extending twice by a year from a 1-year registration: the second is refused
-    let once = n.with_fields(&kit, n.fields.extended(1));
+    let once = n.with_fields(&kit, n.fields.extended(1, PERIOD));
     name_fails(&kit, &extend(&kit, &once, 1));
 }
 
@@ -385,7 +385,7 @@ fn extend_rejects_zero_and_too_many_years() {
     let kit = Kit::new();
     let n = name_case(&kit, b"alice", 0);
     // even from a state whose period would leave room for 3 years
-    let roomy = n.with_fields(&kit, NameFields { period_start: NOW_MS + 5 * YEAR_MS, ..n.fields.clone() });
+    let roomy = n.with_fields(&kit, NameFields { period_start: NOW_MS + 5 * PERIOD, ..n.fields.clone() });
     ok(&kit, &extend(&kit, &roomy, 2), active_block());
     for years in [0, -1, kit.params.max_years + 1] {
         name_fails(&kit, &extend(&kit, &roomy, years));
@@ -409,7 +409,7 @@ fn extend_must_pay_the_tier_price_per_year() {
     }
     // 2 years (from a state with room for them) must pay 2 years: one sompi short fails
     let n = name_case(&kit, b"alice", 0);
-    let roomy = n.with_fields(&kit, NameFields { period_start: NOW_MS + 5 * YEAR_MS, ..n.fields.clone() });
+    let roomy = n.with_fields(&kit, NameFields { period_start: NOW_MS + 5 * PERIOD, ..n.fields.clone() });
     let mut spec = extend(&kit, &roomy, 2);
     spec.outputs.last_mut().unwrap().value += NET_FEE;
     assert_eq!(spec.fee() as u64, 2 * kit.params.renew_price_for(5));
@@ -427,14 +427,14 @@ fn extend_must_pay_the_tier_price_per_year() {
 fn extend_changes_nothing_but_the_expiry() {
     let kit = Kit::new();
     let n = name_case(&kit, b"alice", 9);
-    let next = n.fields.extended(1);
+    let next = n.fields.extended(1, PERIOD);
     for bad in [
         NameFields { owner: xonly(&keypair(9)), ..next.clone() },
         NameFields { price: 0, ..next.clone() },
-        NameFields { period_start: NOW_MS + YEAR_MS, ..next.clone() }, // a fresh period
-        NameFields { period_start: NOW_MS - YEAR_MS, ..next.clone() },
+        NameFields { period_start: NOW_MS + PERIOD, ..next.clone() }, // a fresh period
+        NameFields { period_start: NOW_MS - PERIOD, ..next.clone() },
         next.with_expiry(next.expires_at - 1),
-        n.fields.renewed(1), // renew's continuation under extend
+        n.fields.renewed(1, PERIOD), // renew's continuation under extend
     ] {
         let mut spec = extend(&kit, &n, 1);
         spec.outputs[0] = kit.name_output(&bad, 0);
@@ -460,14 +460,14 @@ fn anyone_may_extend_and_renew_a_name_as_a_gift() {
     let kit = Kit::new();
     let n = name_case(&kit, b"alice", 0);
     let spec = extend(&kit, &n, 1);
-    assert!(matches!(&spec.inputs[1].unlock, Unlock::P2pk(k) if xonly(k) != n.fields.owner));
+    assert!(matches!(&spec.inputs[2].unlock, Unlock::P2pk(k) if xonly(k) != n.fields.owner));
     ok(&kit, &spec, active_block());
     let spec = renew(&kit, &n, 1);
-    assert!(matches!(&spec.inputs[1].unlock, Unlock::P2pk(k) if xonly(k) != n.fields.owner));
+    assert!(matches!(&spec.inputs[2].unlock, Unlock::P2pk(k) if xonly(k) != n.fields.owner));
     ok(&kit, &spec, window_block(&kit, &n));
     // the owner is unchanged by either
-    assert_eq!(n.fields.extended(1).owner, n.fields.owner);
-    assert_eq!(n.fields.renewed(1).owner, n.fields.owner);
+    assert_eq!(n.fields.extended(1, PERIOD).owner, n.fields.owner);
+    assert_eq!(n.fields.renewed(1, PERIOD).owner, n.fields.owner);
 }
 
 // ---------------------------------------------------------------- renew
@@ -476,7 +476,8 @@ fn anyone_may_extend_and_renew_a_name_as_a_gift() {
 fn renew_at_the_window_boundary_passes() {
     let kit = Kit::new();
     let n = name_case(&kit, b"alice", 0);
-    assert_eq!(kit.params.renew_window_ms, 10 * 86_400_000);
+    // one period on the testnet clock (10 days on mainnet)
+    assert_eq!(kit.params.renew_window_ms, PERIOD);
     // lock time exactly expiresAt - window, in the first block whose median time passes it
     let spec = renew(&kit, &n, 1);
     assert_eq!(spec.lock_time as i64, n.fields.expires_at - kit.params.renew_window_ms);
@@ -491,9 +492,9 @@ fn renew_before_the_window_fails() {
     let opens = n.window_opens(&kit);
     // lock time one millisecond before the window, or well before it: the
     // script refuses, whatever the block time
-    for lock in [opens - 1, opens - 86_400_000, NOW_MS + 10_000] {
+    for lock in [opens - 1, opens - 86_400_000, opens - PERIOD / 2] {
         let spec = renew_at(&kit, &n, 1, lock as u64);
-        input_fails(&kit, &spec, block_after(opens + YEAR_MS), 0);
+        input_fails(&kit, &spec, block_after(opens + PERIOD), 0);
     }
     // no lock time at all
     input_fails(&kit, &renew_at(&kit, &n, 1, 0), window_block(&kit, &n), 0);
@@ -521,7 +522,7 @@ fn renew_in_grace_and_after_lapse_passes() {
     let kit = Kit::new();
     let n = name_case(&kit, b"alice", 0);
     let e = n.fields.expires_at;
-    for t in [e, e + 1, e + kit.params.grace_ms - 1, e + kit.params.grace_ms + 1, e + 3 * YEAR_MS] {
+    for t in [e, e + 1, e + kit.params.grace_ms - 1, e + kit.params.grace_ms + 1, e + 3 * PERIOD] {
         // lock time = a recent time (the CLI's "now - 3 min"), past the window
         let spec = renew_at(&kit, &n, 1, (t - 180_000) as u64);
         ok(&kit, &spec, block_after(t));
@@ -532,25 +533,25 @@ fn renew_in_grace_and_after_lapse_passes() {
 fn renew_starts_a_new_period_at_the_old_expiry() {
     let kit = Kit::new();
     let n = name_case(&kit, b"alice", 0);
-    let next = n.fields.renewed(1);
-    assert_eq!((next.period_start, next.expires_at), (NOW_MS + YEAR_MS, NOW_MS + 2 * YEAR_MS));
+    let next = n.fields.renewed(1, PERIOD);
+    assert_eq!((next.period_start, next.expires_at), (NOW_MS + PERIOD, NOW_MS + 2 * PERIOD));
     ok(&kit, &renew(&kit, &n, 1), window_block(&kit, &n));
     // a lapsed name counts from its old expiry too (no free gap years)
-    let lapsed = n.with_fields(&kit, n.fields.with_period(NOW_MS - 4 * YEAR_MS, NOW_MS - 3 * YEAR_MS));
+    let lapsed = n.with_fields(&kit, n.fields.with_period(NOW_MS - 4 * PERIOD, NOW_MS - 3 * PERIOD));
     let spec = renew_at(&kit, &lapsed, 1, NOW_MS as u64);
     ok(&kit, &spec, block_after(NOW_MS));
     // keeping the old periodStart (extend's continuation), or counting from now, is refused
     for bad in [
-        n.fields.extended(1),
-        n.fields.with_period(NOW_MS + YEAR_MS - 10 * 86_400_000, NOW_MS + 2 * YEAR_MS),
-        n.fields.with_period(NOW_MS + YEAR_MS, NOW_MS + 2 * YEAR_MS + 1),
+        n.fields.extended(1, PERIOD),
+        n.fields.with_period(NOW_MS + PERIOD - 10 * 86_400_000, NOW_MS + 2 * PERIOD),
+        n.fields.with_period(NOW_MS + PERIOD, NOW_MS + 2 * PERIOD + 1),
     ] {
         let mut spec = renew(&kit, &n, 1);
         spec.outputs[0] = kit.name_output(&bad, 0);
         input_fails(&kit, &spec, window_block(&kit, &n), 0);
     }
     let mut spec = renew_at(&kit, &lapsed, 1, NOW_MS as u64);
-    spec.outputs[0] = kit.name_output(&lapsed.fields.with_period(NOW_MS, NOW_MS + YEAR_MS), 0);
+    spec.outputs[0] = kit.name_output(&lapsed.fields.with_period(NOW_MS, NOW_MS + PERIOD), 0);
     input_fails(&kit, &spec, block_after(NOW_MS), 0);
 }
 
@@ -560,7 +561,7 @@ fn renew_then_renew_again_at_once_fails() {
     let n = name_case(&kit, b"alice", 0);
     let blk = window_block(&kit, &n);
     ok(&kit, &renew(&kit, &n, 1), blk);
-    let r = n.with_fields(&kit, n.fields.renewed(1));
+    let r = n.with_fields(&kit, n.fields.renewed(1, PERIOD));
     // the window moved a year on: the same lock time, or any time before
     // the new window, is refused
     let spec = renew_at(&kit, &r, 1, n.window_opens(&kit) as u64);
@@ -577,11 +578,11 @@ fn renew_one_then_extend_one_passes_renew_two_then_extend_fails() {
     let n = name_case(&kit, b"alice", 0);
     let blk = window_block(&kit, &n);
     ok(&kit, &renew(&kit, &n, 1), blk);
-    let r1 = n.with_fields(&kit, n.fields.renewed(1));
+    let r1 = n.with_fields(&kit, n.fields.renewed(1, PERIOD));
     ok(&kit, &extend(&kit, &r1, 1), blk);
-    assert_eq!(r1.fields.extended(1).expires_at, r1.fields.period_start + 2 * YEAR_MS);
+    assert_eq!(r1.fields.extended(1, PERIOD).expires_at, r1.fields.period_start + 2 * PERIOD);
     ok(&kit, &renew(&kit, &n, 2), blk);
-    let r2 = n.with_fields(&kit, n.fields.renewed(2));
+    let r2 = n.with_fields(&kit, n.fields.renewed(2, PERIOD));
     name_fails(&kit, &extend(&kit, &r2, 1));
 }
 
@@ -617,11 +618,11 @@ fn renew_rejects_zero_and_too_many_years() {
 fn renew_changes_nothing_but_the_period() {
     let kit = Kit::new();
     let n = name_case(&kit, b"alice", 9);
-    let next = n.fields.renewed(1);
+    let next = n.fields.renewed(1, PERIOD);
     for bad in [
         NameFields { owner: xonly(&keypair(9)), ..next.clone() },
         NameFields { price: 0, ..next.clone() },
-        next.with_expiry(next.expires_at + YEAR_MS), // two years for the price of one
+        next.with_expiry(next.expires_at + PERIOD), // two years for the price of one
     ] {
         let mut spec = renew(&kit, &n, 1);
         spec.outputs[0] = kit.name_output(&bad, 0);
@@ -646,9 +647,9 @@ fn renew_stops_at_the_expiry_cap() {
     let kit = Kit::new();
     let n = name_case(&kit, b"alice", 0);
     let cap = 100_000_000_000_000_000i64;
-    let over = n.with_fields(&kit, n.fields.with_period(cap - YEAR_MS, cap + 1));
+    let over = n.with_fields(&kit, n.fields.with_period(cap - PERIOD, cap + 1));
     input_fails(&kit, &renew(&kit, &over, 1), window_block(&kit, &over), 0);
-    let at = n.with_fields(&kit, n.fields.with_period(cap - YEAR_MS, cap));
+    let at = n.with_fields(&kit, n.fields.with_period(cap - PERIOD, cap));
     ok(&kit, &renew(&kit, &at, 1), window_block(&kit, &at));
 }
 
@@ -656,13 +657,14 @@ fn renew_stops_at_the_expiry_cap() {
 fn two_renewals_cannot_share_one_fee() {
     let kit = Kit::new();
     let a = name_case(&kit, b"alice", 0);
-    let bf = NameFields::new(b"bobby", &a.fields.owner, 0, NOW_MS, NOW_MS + YEAR_MS);
+    let bf = NameFields::new(b"bobby", &a.fields.owner, 0, NOW_MS, NOW_MS + PERIOD);
     let mut spec = renew(&kit, &a, 1);
-    spec.inputs.push(Input::contract(kit.name_utxo(&bf, 26), &kit.name, bf.encode(), "renew", vec![int(1)]));
-    spec.outputs.insert(1, kit.name_output(&bf.renewed(1), 2));
+    // bobby at input 3 reads the same shard (input 1)
+    spec.inputs.push(Input::contract(kit.name_utxo(&bf, 26), &kit.name, bf.encode(), "renew", vec![int(1), int(PAID_PRICE_IDX as i64)]));
+    spec.outputs.insert(1, kit.name_output(&bf.renewed(1, PERIOD), 3));
     let built = kit.build(&spec);
     let res = built.run_inputs();
-    assert!(res[0].is_err() && res[2].is_err(), "{res:?}");
+    assert!(res[0].is_err() && res[3].is_err(), "{res:?}");
     assert!(kit.validate(&built, window_block(&kit, &a)).is_err());
 }
 
@@ -670,13 +672,13 @@ fn two_renewals_cannot_share_one_fee() {
 fn an_extend_and_a_renew_cannot_share_one_fee() {
     let kit = Kit::new();
     let a = name_case(&kit, b"alice", 0);
-    let bf = NameFields::new(b"bobby", &a.fields.owner, 0, NOW_MS, NOW_MS + YEAR_MS);
+    let bf = NameFields::new(b"bobby", &a.fields.owner, 0, NOW_MS, NOW_MS + PERIOD);
     let mut spec = renew(&kit, &a, 1);
-    spec.inputs.push(Input::contract(kit.name_utxo(&bf, 26), &kit.name, bf.encode(), "extend", vec![int(1)]));
-    spec.outputs.insert(1, kit.name_output(&bf.extended(1), 2));
+    spec.inputs.push(Input::contract(kit.name_utxo(&bf, 26), &kit.name, bf.encode(), "extend", vec![int(1), int(PAID_PRICE_IDX as i64)]));
+    spec.outputs.insert(1, kit.name_output(&bf.extended(1, PERIOD), 3));
     let built = kit.build(&spec);
     let res = built.run_inputs();
-    assert!(res[0].is_err() && res[2].is_err(), "{res:?}");
+    assert!(res[0].is_err() && res[3].is_err(), "{res:?}");
     assert!(kit.validate(&built, window_block(&kit, &a)).is_err());
 }
 
@@ -686,10 +688,11 @@ fn renew_and_extend_reject_more_than_eight_inputs() {
     let n = name_case(&kit, b"alice", 0);
     let payer = keypair(3);
     for (mut spec, blk) in [(renew(&kit, &n, 1), window_block(&kit, &n)), (extend(&kit, &n, 1), active_block())] {
-        for t in 0..7u8 {
+        // [name, price shard, funding] + 6 = 9
+        for t in 0..6u8 {
             spec.inputs.push(Input::new(kit.p2pk_utxo(&payer, kas(1), 110 + t), Unlock::P2pk(payer)));
         }
-        spec.outputs.last_mut().unwrap().value += kas(7);
+        spec.outputs.last_mut().unwrap().value += kas(6);
         assert_eq!(spec.inputs.len(), 9);
         input_fails(&kit, &spec, blk, 0);
     }

@@ -7,6 +7,9 @@ pragma silverscript ^0.1.0;
 // this template (it never runs the compiler), so the per-offer data is state:
 //   key          byte[32]  blake3(name) of the wanted name
 //   buyer        byte[32]  x-only key that receives the name / the refund
+//   seller       byte[32]  the name's owner when the offer was made (registry
+//                          v3): only that owner can accept or decline it, so
+//                          a change of owner ends every earlier offer
 //   refundAfter  int       DAA score from which anyone may refund
 //
 // Baked once per network (after the registry genesis):
@@ -21,6 +24,7 @@ pragma silverscript ^0.1.0;
 contract KachatOffer(
     byte[32] initKey,
     byte[32] initBuyer,
+    byte[32] initSeller,
     int initRefundAfter,
     byte[32] registryCovId,
     byte[32] nameTemplateHash,
@@ -40,23 +44,34 @@ contract KachatOffer(
 
     byte[32] key = initKey;
     byte[32] buyer = initBuyer;
+    byte[32] seller = initSeller;
     int refundAfter = initRefundAfter;
+
+    // checkSig against the seller's x-only key, restricted to SIGHASH_ALL.
+    function sellerSigned(sig s): bool {
+        byte[65] raw = byte[65](s);
+        return raw[64] == 0x01 && checkSig(s, pubkey(seller));
+    }
 
     // The name at input nameIdx (the offer sits right after it, so one name
     // input can settle at most one offer) continues to the buyer, unlisted,
     // with its paid period (periodStart, expiresAt) unchanged (accept works
     // whether or not it expired),
     // and the output right after the name's continuation pays the current
-    // owner at least the offer's value minus maxFee. The owner consents with
-    // the name's own transfer signature (SIGHASH_ALL) in the same tx, or the
-    // name is listed and runs buy() with newOwner = buyer.
-    entry accept(int nameIdx) {
+    // owner at least the offer's value minus maxFee.
+    // Registry v3: the name's owner must still be the seller the offer was made
+    // to, and the seller signs this input too. Nobody else can pair the offer
+    // with a listing any more, and an offer made to an earlier owner can never
+    // be accepted.
+    entry accept(int nameIdx, sig sellerSig) {
+        require(sellerSigned(sellerSig), "seller signature");
         require(nameIdx >= 0, "name index");
         require(nameIdx < tx.inputs.length, "name index");
         require(this.activeInputIndex == nameIdx + 1, "offer right after its name");
         require(OpInputCovenantId(nameIdx) == registryCovId, "registry name");
         NameState cur = readInputStateWithTemplate(nameIdx, namePrefixLen, nameSuffixLen, nameTemplateHash);
         require(cur.key == key, "the wanted name");
+        require(cur.owner == seller, "still the seller's");
 
         require(OpAuthOutputCount(nameIdx) == 1, "one name continuation");
         int nameOut = OpAuthOutputIdx(nameIdx, 0);
@@ -81,6 +96,19 @@ contract KachatOffer(
         byte[65] raw = byte[65](buyerSig);
         require(raw[64] == 0x01, "SIGHASH_ALL");
         require(checkSig(buyerSig, pubkey(buyer)), "buyer signature");
+    }
+
+    // The seller turns the offer down (registry v3): the KAS goes straight back
+    // to the buyer, alone in a 1-in/1-out transaction like refund, its fee out
+    // of the offer (at most maxFee). Also how the app returns every open offer
+    // when the seller transfers, sells or releases the name.
+    entry decline(sig sellerSig) {
+        require(sellerSigned(sellerSig), "seller signature");
+        require(tx.inputs.length == 1, "decline alone");
+        require(tx.outputs.length == 1, "one return output");
+        byte[36] buyerLock = new ScriptPubKeyP2PK(pubkey(buyer));
+        require(tx.outputs[0].scriptPubKey == byte[](buyerLock), "back to the buyer");
+        require(tx.outputs[0].value >= tx.inputs[0].value - maxFee, "return covers the offer");
     }
 
     // From refundAfter on, anyone may send the KAS back to the buyer. The

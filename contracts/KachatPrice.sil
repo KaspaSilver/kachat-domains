@@ -1,0 +1,116 @@
+pragma silverscript ^0.1.0;
+
+// .kachat price record (registry v3, docs/REGISTRY_V3.md section 2).
+//
+// The registration and renewal price per period, by name length, as K
+// identical shards that share one covenant id: the price covenant, minted by
+// its own genesis BEFORE the registry, whose gap and name templates bake its
+// id. It is never the registry's covenant, so the registry's "exactly one
+// registry input" rule (one fee per paid operation) is untouched.
+//
+// A gap or a name reads a shard to price a register / extend / renew: a
+// record has to be spent to be read, so the shard runs use() alongside and
+// comes back unchanged. K shards keep those transactions from queueing behind
+// one another.
+//
+// Runtime state (spliced into the redeem script):
+//   shard      int       0 .. shards-1, fixed for the shard's life
+//   authority  byte[32]  x-only key that may change prices (and itself)
+//   p1 .. p5   int       price per period for names of 1, 2, 3, 4, 5+ bytes,
+//                        in sompi; registering and renewing both use it
+//
+// Baked parameters: shards (K, 1..8), priceValue (exact value of every shard).
+//
+// Changes take effect at once, in either direction (the owner's choice). A
+// change - new prices, a new authority key, or both - rewrites every shard in
+// one transaction, led by shard 0, so the shards can never disagree.
+contract KachatPrice(
+    int initShard,
+    byte[32] initAuthority,
+    int initP1,
+    int initP2,
+    int initP3,
+    int initP4,
+    int initP5,
+    int shards,
+    int priceValue
+) {
+    int constant MAX_SHARDS = 8;
+    // A price above this is refused (1e9 KAS): price * maxYears (<= 31) and the
+    // 8-term fee sums stay far inside a script integer.
+    int constant MAX_PRICE = 100000000000000000;
+
+    int shard = initShard;
+    byte[32] authority = initAuthority;
+    int p1 = initP1;
+    int p2 = initP2;
+    int p3 = initP3;
+    int p4 = initP4;
+    int p5 = initP5;
+
+    // checkSig against the authority's x-only key, restricted to SIGHASH_ALL
+    // (it commits to every output, so to every shard's new state).
+    function authoritySigned(sig s): bool {
+        byte[65] raw = byte[65](s);
+        return raw[64] == 0x01 && checkSig(s, pubkey(authority));
+    }
+
+    function validPrice(int p) {
+        require(p >= 0, "price >= 0");
+        require(p <= MAX_PRICE, "price cap");
+    }
+
+    // Every shard is an input, in shard order, and each continues to exactly
+    // one output, the shard-th price output. Returns the covenant id.
+    function everyShard(): byte[32] {
+        byte[32] covId = OpInputCovenantId(this.activeInputIndex);
+        require(OpCovInputCount(covId) == shards, "every shard");
+        require(OpCovOutputCount(covId) == shards, "every shard continues");
+        require(OpCovInputIdx(covId, shard) == this.activeInputIndex, "shards in order");
+        require(OpAuthOutputCount(this.activeInputIndex) == 1, "one continuation");
+        require(OpAuthOutputIdx(this.activeInputIndex, 0) == OpCovOutputIdx(covId, shard), "continuations in order");
+        return covId;
+    }
+
+    // Read by a register / extend / renew in the same transaction: the shard
+    // moves alone in its covenant and comes back exactly as it was.
+    entry use() {
+        byte[32] covId = OpInputCovenantId(this.activeInputIndex);
+        require(OpCovInputCount(covId) == 1, "one price input");
+        require(OpCovOutputCount(covId) == 1, "one price output");
+        require(OpAuthOutputCount(this.activeInputIndex) == 1, "one continuation");
+        int out = OpAuthOutputIdx(this.activeInputIndex, 0);
+        require(tx.outputs[out].value == priceValue, "shard value");
+        validateOutputState(out, State { shard: shard, authority: authority, p1: p1, p2: p2, p3: p3, p4: p4, p5: p5 });
+    }
+
+    // Shard 0 leads a change: the authority signs, and shard 0 writes the new
+    // prices and the (possibly new) authority into EVERY shard's continuation;
+    // the others run follow(). A price change passes the current authority, a
+    // key rotation the current prices.
+    entry update(byte[32] newAuthority, int n1, int n2, int n3, int n4, int n5, sig authoritySig) {
+        require(shard == 0, "shard 0 leads");
+        require(authoritySigned(authoritySig), "authority signature");
+        require(newAuthority != byte[32](0x0000000000000000000000000000000000000000000000000000000000000000), "authority key");
+        validPrice(n1);
+        validPrice(n2);
+        validPrice(n3);
+        validPrice(n4);
+        validPrice(n5);
+        byte[32] covId = everyShard();
+        for (j, 0, shards, MAX_SHARDS) {
+            int out = OpCovOutputIdx(covId, j);
+            require(tx.outputs[out].value == priceValue, "shard value");
+            validateOutputState(out, State { shard: j, authority: newAuthority, p1: n1, p2: n2, p3: n3, p4: n4, p5: n5 });
+        }
+    }
+
+    // Every shard other than 0 in a change shard 0 leads. Shard 0 can only be
+    // in such a transaction through update() (use() refuses a second price
+    // input, follow() refuses shard 0), which the authority signs and which
+    // checks every shard's continuation.
+    entry follow() {
+        require(shard != 0, "shard 0 leads");
+        everyShard();
+    }
+}

@@ -45,7 +45,7 @@ fn registers_several_years_up_front() {
     let kit = Kit::new();
     for years in [2, kit.params.max_years] {
         let r = register(&kit, b"alice", years);
-        assert_eq!(r.name_fields().expires_at, NOW_MS + years * YEAR_MS);
+        assert_eq!(r.name_fields(PERIOD).expires_at, NOW_MS + years * PERIOD);
         assert_eq!(r.fee() as u64, kit.params.price_for(5) * years as u64 + NET_FEE);
         ok(&kit, &r.spec, r.block);
     }
@@ -82,9 +82,9 @@ fn rejects_zero_years_and_more_than_max_years() {
         r.spec.inputs[0].args_mut()[4] = int(years);
         if years > 0 {
             // make the name output and the fee consistent with the claimed years
-            let fields = NameFields::new(b"alice", &xonly(&r.owner), 0, NOW_MS, NOW_MS + years * YEAR_MS);
+            let fields = NameFields::new(b"alice", &xonly(&r.owner), 0, NOW_MS, NOW_MS + years * PERIOD);
             r.spec.outputs[2] = kit.name_output(&fields, 0);
-            r.spec.inputs[2].utxo.entry.amount += kit.params.price_for(5) * years as u64;
+            r.spec.inputs[3].utxo.entry.amount += kit.params.price_for(5) * years as u64; // the funding
             assert!(r.fee() as u64 >= kit.params.price_for(5) * years as u64);
         }
         gap_fails(&kit, &r);
@@ -96,16 +96,16 @@ fn register_sets_period_start_to_now() {
     let kit = Kit::new();
     for years in [1, 2] {
         let r = register(&kit, b"alice", years);
-        let f = r.name_fields();
-        assert_eq!((f.period_start, f.expires_at), (NOW_MS, NOW_MS + years * YEAR_MS));
+        let f = r.name_fields(PERIOD);
+        assert_eq!((f.period_start, f.expires_at), (NOW_MS, NOW_MS + years * PERIOD));
         let built = ok(&kit, &r.spec, r.block);
         assert_eq!(built.tx.outputs[2].script_public_key, kit.name.spk(&f.encode()));
     }
     // any other periodStart is refused: an earlier one would let extend add
     // years, a later one would shorten nothing but is still not the rule
-    for start in [NOW_MS - YEAR_MS, NOW_MS - 1, NOW_MS + 1, 0] {
+    for start in [NOW_MS - PERIOD, NOW_MS - 1, NOW_MS + 1, 0] {
         let mut r = register(&kit, b"alice", 1);
-        r.spec.outputs[2] = kit.name_output(&NameFields { period_start: start, ..r.name_fields() }, 0);
+        r.spec.outputs[2] = kit.name_output(&NameFields { period_start: start, ..r.name_fields(PERIOD) }, 0);
         gap_fails(&kit, &r);
     }
 }
@@ -114,7 +114,7 @@ fn register_sets_period_start_to_now() {
 fn rejects_an_expiry_that_does_not_match_the_years_paid() {
     let kit = Kit::new();
     let mut r = register(&kit, b"alice", 1);
-    let fields = NameFields::new(b"alice", &xonly(&r.owner), 0, NOW_MS, NOW_MS + 2 * YEAR_MS);
+    let fields = NameFields::new(b"alice", &xonly(&r.owner), 0, NOW_MS, NOW_MS + 2 * PERIOD);
     r.spec.outputs[2] = kit.name_output(&fields, 0);
     gap_fails(&kit, &r);
 }
@@ -162,7 +162,7 @@ fn rejects_a_front_runner_claiming_someone_elses_commit() {
     let mut r = register(&kit, b"alice", 1);
     let attacker = xonly(&keypair(9));
     r.spec.inputs[0].args_mut()[1] = bytes(&attacker);
-    let fields = NameFields::new(b"alice", &attacker, 0, NOW_MS, NOW_MS + YEAR_MS);
+    let fields = NameFields::new(b"alice", &attacker, 0, NOW_MS, NOW_MS + PERIOD);
     r.spec.outputs[2] = kit.name_output(&fields, 0);
     gap_fails(&kit, &r);
 }
@@ -271,7 +271,7 @@ fn rejects_an_absurd_now() {
     let now = 1_000_000_000_000_001i64; // above MAX_NOW
     r.spec.inputs[0].args_mut()[3] = int(now);
     r.spec.lock_time = now as u64;
-    let fields = NameFields::new(b"alice", &xonly(&r.owner), 0, now, now + YEAR_MS);
+    let fields = NameFields::new(b"alice", &xonly(&r.owner), 0, now, now + PERIOD);
     r.spec.outputs[2] = kit.name_output(&fields, 0);
     gap_fails(&kit, &r);
 }
@@ -360,9 +360,9 @@ fn rejects_an_extra_registry_output() {
     let kit = Kit::new();
     let mut r = register(&kit, b"alice", 1);
     // a second copy of the name, also bound to the registry by input 0
-    let fields = r.name_fields();
+    let fields = r.name_fields(PERIOD);
     r.spec.outputs.insert(3, kit.name_output(&fields, 0));
-    r.spec.inputs[2].utxo.entry.amount += kit.params.bond;
+    r.spec.inputs[3].utxo.entry.amount += kit.params.bond; // the funding
     gap_fails(&kit, &r);
 }
 
@@ -400,7 +400,7 @@ fn rejects_wrong_output_values() {
 #[test]
 fn rejects_wrong_name_state() {
     let kit = Kit::new();
-    let base = register(&kit, b"alice", 1).name_fields();
+    let base = register(&kit, b"alice", 1).name_fields(PERIOD);
     let other = xonly(&keypair(9));
     for fields in [
         base.with_owner(&other),
@@ -423,7 +423,7 @@ fn rejects_a_forged_name_template() {
     let mut evil_suffix = kit.name.suffix.clone();
     evil_suffix.push(0x51); // OP_TRUE appended
     r.spec.inputs[0].args_mut()[6] = bytes(&evil_suffix);
-    let state = r.name_fields().encode();
+    let state = r.name_fields(PERIOD).encode();
     let redeem = [kit.name.prefix.as_slice(), &state, &evil_suffix].concat();
     r.spec.outputs[2] = kit.registry_output(kit.params.bond, kaspa_txscript::pay_to_script_hash_script(&redeem), 0);
     gap_fails(&kit, &r);
@@ -465,11 +465,12 @@ fn rejects_two_registry_inputs() {
 fn rejects_more_than_eight_inputs_or_outputs() {
     let kit = Kit::new();
     // 9 inputs
+    // [gap, commit, price shard, funding] + 5 = 9
     let mut r = register(&kit, b"alice", 1);
-    for t in 0..6u8 {
+    for t in 0..5u8 {
         r.spec.inputs.push(Input::new(kit.p2pk_utxo(&r.owner, kas(1), 100 + t), Unlock::P2pk(r.owner)));
     }
-    r.spec.outputs.last_mut().unwrap().value += kas(6);
+    r.spec.outputs.last_mut().unwrap().value += kas(5);
     assert_eq!(r.spec.inputs.len(), 9);
     gap_fails(&kit, &r);
     // exactly 8 is fine
@@ -479,8 +480,9 @@ fn rejects_more_than_eight_inputs_or_outputs() {
     // 9 outputs
     let mut r = register(&kit, b"alice", 1);
     let ox = xonly(&r.owner);
-    r.spec.inputs[2].utxo.entry.amount += kas(5);
-    for _ in 0..5 {
+    // [gap, gap, name, shard, change] + 4 = 9
+    r.spec.inputs[3].utxo.entry.amount += kas(4);
+    for _ in 0..4 {
         r.spec.outputs.push(TransactionOutput::new(kas(1), p2pk_spk(&ox)));
     }
     assert_eq!(r.spec.outputs.len(), 9);

@@ -24,7 +24,7 @@ fn owner_release_merges_the_gaps_and_frees_the_bond() {
 fn owner_release_works_while_listed_and_after_expiry() {
     let kit = Kit::new();
     let mut e = release(&kit, b"alice");
-    e.n.fields = e.n.fields.with_price(5).with_expiry(NOW_MS - 10 * YEAR_MS);
+    e.n.fields = e.n.fields.with_price(5).with_expiry(NOW_MS - 10 * PERIOD);
     e.n.utxo = kit.name_utxo(&e.n.fields, 20);
     e.spec.inputs[1] = Input::contract(e.n.utxo.clone(), &kit.name, e.n.fields.encode(), "release", vec![Arg::Sig(e.n.owner)]);
     ok(&kit, &e.spec, e.block);
@@ -162,7 +162,7 @@ fn exit_rejects_reordered_seats() {
 fn exit_rejects_a_fourth_registry_input() {
     let kit = Kit::new();
     let mut e = release(&kit, b"alice");
-    let other = NameFields::new(b"bobby", &e.n.fields.owner, 0, NOW_MS, NOW_MS + YEAR_MS);
+    let other = NameFields::new(b"bobby", &e.n.fields.owner, 0, NOW_MS, NOW_MS + PERIOD);
     e.spec.inputs.push(Input::contract(kit.name_utxo(&other, 33), &kit.name, other.encode(), "release", vec![Arg::Sig(e.n.owner)]));
     e.spec.outputs.last_mut().unwrap().value += kit.params.bond;
     fails_at(&kit, &e, 0);
@@ -180,11 +180,12 @@ fn reclaim_after_grace_returns_the_bond_to_the_last_owner() {
 }
 
 #[test]
-fn grace_is_ten_days() {
+fn grace_is_one_period_on_the_testnet_clock() {
+    // ten minutes on testnet (10 days on mainnet, params/mainnet.json)
     let kit = Kit::new();
-    assert_eq!(kit.params.grace_ms, 864_000_000);
+    assert_eq!(kit.params.grace_ms, PERIOD);
     let e = reclaim(&kit, b"alice");
-    assert_eq!(e.spec.lock_time as i64, e.n.fields.expires_at + 10 * 24 * 3_600_000);
+    assert_eq!(e.spec.lock_time as i64, e.n.fields.expires_at + 10 * 60_000);
 }
 
 #[test]
@@ -259,7 +260,7 @@ fn reclaim_uses_the_stored_expiry() {
     // a renewed name (later expiresAt) cannot be reclaimed at the old time
     let kit = Kit::new();
     let mut e = reclaim(&kit, b"alice");
-    e.n.fields = e.n.fields.with_expiry(e.n.fields.expires_at + YEAR_MS);
+    e.n.fields = e.n.fields.with_expiry(e.n.fields.expires_at + PERIOD);
     e.n.utxo = kit.name_utxo(&e.n.fields, 20);
     e.spec.inputs[1] = Input::contract(e.n.utxo.clone(), &kit.name, e.n.fields.encode(), "reclaim", vec![]);
     fails_at(&kit, &e, 1);
@@ -272,11 +273,11 @@ fn a_name_cannot_sit_at_seat_2() {
     let kit = Kit::new();
     for entry in ["release", "reclaim", "transfer", "extend", "renew"] {
         let mut e = release(&kit, b"alice");
-        let other = NameFields::new(b"bobby", &e.n.fields.owner, 0, NOW_MS - 6 * YEAR_MS, NOW_MS - 5 * YEAR_MS);
+        let other = NameFields::new(b"bobby", &e.n.fields.owner, 0, NOW_MS - 6 * PERIOD, NOW_MS - 5 * PERIOD);
         let args = match entry {
             "release" => vec![Arg::Sig(e.n.owner)],
             "transfer" => vec![bytes(&other.owner), Arg::Sig(e.n.owner)],
-            "extend" | "renew" => vec![int(1)],
+            "extend" | "renew" => vec![int(1), int(0)],
             _ => vec![],
         };
         e.spec.inputs[2] = Input::contract(kit.name_utxo(&other, 34), &kit.name, other.encode(), entry, args);
