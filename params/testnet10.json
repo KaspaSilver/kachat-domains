@@ -27,6 +27,6 @@
     "lo": "0000000000000000000000000000000000000000000000000000000000000000",
     "hi": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
   },
-  "priceCovenantId": null,
-  "registryCovenantId": null
+  "priceCovenantId": "4d7685c06d5e3d37d8670fd68f7ac19b9d558398f3af268b310e9ad673f93338",
+  "registryCovenantId": "90f56bd1babeda8e901639eaffacd9dba211c32d3f4f2587916f419140ee6d24"
 }

@@ -29,8 +29,8 @@
       "hi": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
     }
   },
-  "priceCovenantId": null,
-  "registryCovenantId": null,
+  "priceCovenantId": "4d7685c06d5e3d37d8670fd68f7ac19b9d558398f3af268b310e9ad673f93338",
+  "registryCovenantId": "90f56bd1babeda8e901639eaffacd9dba211c32d3f4f2587916f419140ee6d24",
   "contracts": {
     "KachatPrice": {
       "bytecodeLen": 1691,
@@ -48,8 +48,58 @@
       },
       "bytecodeSha256": "afa8dfb72e946fd639066111511e92536e34d59d4caa5b88789f8956920532c6"
     },
-    "KachatName": "not built: set priceCovenantId after the price genesis",
-    "KachatGap": "not built: set priceCovenantId after the price genesis",
-    "KachatOffer": "not built: set priceCovenantId after the price genesis"
+    "KachatName": {
+      "bytecodeLen": 4058,
+      "stateSpan": {
+        "offset": 1,
+        "len": 126
+      },
+      "prefixLen": 1,
+      "suffixLen": 3931,
+      "templateHash": "973dba9aaa58ba8f59ac28a4dc45001209fae7708a89ffbcf49c1bc1ba5adfc4",
+      "dispatchTags": {
+        "buy": "76a02eb9",
+        "extend": "ed8d84c6",
+        "list": "674a8ea4",
+        "reclaim": "f56af4df",
+        "release": "388ad0b4",
+        "renew": "6daae613",
+        "transfer": "794dca54"
+      },
+      "bytecodeSha256": "753939b50ad7eb17c59a91c4ac8fa311a207dbf4a9d4dd2418c7f1559a47d157"
+    },
+    "KachatGap": {
+      "bytecodeLen": 4498,
+      "stateSpan": {
+        "offset": 1,
+        "len": 66
+      },
+      "prefixLen": 1,
+      "suffixLen": 4431,
+      "templateHash": "3c2c0f4f076da46f401ee19ea232580207c1c2bcd5cbdb626ead0b7f7693a157",
+      "dispatchTags": {
+        "absorbed": "dab76355",
+        "merge": "63d25bc2",
+        "register": "0e5c563d"
+      },
+      "bytecodeSha256": "cc909abde2b470f09e0c49df515d6332b8edfa34c89848d8207e0b72bb43f2e2"
+    },
+    "KachatOffer": {
+      "bytecodeLen": 1114,
+      "stateSpan": {
+        "offset": 1,
+        "len": 108
+      },
+      "prefixLen": 1,
+      "suffixLen": 1005,
+      "templateHash": "8d6f8cdd287b2776b4c763691f28ffc08cdbe1552d2d7b7acdce8400268d1be5",
+      "dispatchTags": {
+        "accept": "2e18ed39",
+        "decline": "aead5037",
+        "refund": "777f5b11",
+        "withdraw": "80344ff1"
+      },
+      "bytecodeSha256": "c46474b1d9345a7137884f882cb1f2f36f384fe04191eb978f0c487d5280427d"
+    }
   }
 }
