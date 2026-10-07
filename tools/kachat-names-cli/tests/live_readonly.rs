@@ -59,17 +59,8 @@ async fn scanner_walks_a_minute_of_chain() {
     // a registry nobody has: the walk must decode every accepted transaction and find nothing
     let paths = Paths::find(None).unwrap();
     let id = Hash::from_bytes(*blake3::hash(b"kachat-names: no such registry").as_bytes());
-    let pid = Hash::from_bytes(*blake3::hash(b"kachat-names: no such price record").as_bytes());
-    let kit = Templates::load(&paths.root).kit(pid, id).unwrap();
-    let mut reg = Registry::at_genesis(
-        id,
-        kaspa_consensus_core::tx::TransactionId::from_bytes([1; 32]),
-        100_000_000,
-        Some(p.sink),
-        pid,
-        kaspa_consensus_core::tx::TransactionId::from_bytes([2; 32]),
-        vec![],
-    );
+    let kit = Templates::load(&paths.root).kit(id).unwrap();
+    let mut reg = Registry::at_genesis(id, kaspa_consensus_core::tx::TransactionId::from_bytes([1; 32]), 100_000_000, Some(p.sink));
     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     let t = std::time::Instant::now();
     let rep = scan(&node, &kit, &mut reg, 20, 100, false).await.expect("scan");

@@ -13,8 +13,7 @@ use std::path::Path;
 use anyhow::{Result, anyhow, bail, ensure};
 use kachat_names_harness::{
     Arg, Block, Built, Costs, Input, Kit, NameFields, NetParams, OfferFields, Template, TransactionOutput, TxSpec, Unlock, Utxo, bytes,
-    commit_redeem, commitment, compile_gap_in, compile_name_in, compile_offer_in, gap_state, genesis_spec, int, keypair, name_key,
-    p2pk_spk, price_genesis_spec, xonly,
+    commit_redeem, commitment, compile_gap_in, compile_name_in, compile_offer_in, gap_state, genesis_spec, int, name_key, p2pk_spk, xonly,
 };
 use kaspa_consensus_core::{
     constants::LOCK_TIME_THRESHOLD,
@@ -27,7 +26,7 @@ use secp256k1::Keypair;
 use crate::{
     commits::CommitRec,
     net::{PARAMS_FILE, consensus_params, p2pk_address, spk_address},
-    registry::{GapRec, NameRec, OfferRec, PriceRec},
+    registry::{GapRec, NameRec, OfferRec},
     util::{SOMPI, fmt_dur, fmt_kas, fmt_ms, hex},
 };
 
@@ -49,59 +48,57 @@ pub const MAX_INPUTS: usize = 24;
 // environment
 // ---------------------------------------------------------------------------
 
-/// Templates of the pinned build (artifacts/testnet10) and the params. Registry v3:
-/// the price template is always built; the name and gap bake the price covenant id and
-/// the offer the registry id, so they are compiled here for given ids (and checked
-/// byte-identical with artifacts/ once scripts/build.sh has built them for those ids).
+/// Templates of the pinned build (artifacts/testnet10) and the params. Registry v4
+/// bakes both price tables into the name and the gap, so they are compiled here from
+/// the params (the prices the builders charge are then exactly the baked ones) and must
+/// be byte-identical with the artifacts scripts/build.sh wrote. The offer bakes the
+/// registry id, so it is compiled for a given id (and checked against its artifact once
+/// scripts/build.sh has built it for that id).
 pub struct Templates {
     pub params: NetParams,
     pub root: std::path::PathBuf,
 }
 
-fn params_id(root: &Path, key: &str) -> Option<String> {
+fn params_registry_id(root: &Path) -> Option<String> {
     std::fs::read_to_string(root.join("params").join(format!("{PARAMS_FILE}.json")))
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .and_then(|v| v[key].as_str().map(str::to_owned))
+        .and_then(|v| v["registryCovenantId"].as_str().map(str::to_owned))
 }
 
 impl Templates {
     pub fn load(root: &Path) -> Templates {
         Templates { params: NetParams::load_in(root, PARAMS_FILE), root: root.to_path_buf() }
     }
-    pub fn price(&self) -> Template {
-        Template::load_in(&self.root, PARAMS_FILE, "KachatPrice")
-    }
 
-    /// When `id` is the id params carry under `key` and the artifact exists, the
-    /// in-process compile must equal it.
-    fn check_artifact(&self, key: &str, id: Hash, contract: &str, t: &Template) -> Result<()> {
+    /// When the artifact exists, the in-process compile must equal it.
+    fn check_artifact(&self, contract: &str, t: &Template, built_for: &str) -> Result<()> {
         let path = self.root.join("artifacts").join(PARAMS_FILE).join(format!("{contract}.json"));
-        if path.exists() && params_id(&self.root, key).as_deref() == Some(id.to_string().as_str()) {
+        if path.exists() {
             let art = Template::load_in(&self.root, PARAMS_FILE, contract);
-            ensure!(art.bytecode == t.bytecode, "artifacts/{PARAMS_FILE}/{contract}.json was built for another {key} than {id}");
+            ensure!(art.bytecode == t.bytecode, "artifacts/{PARAMS_FILE}/{contract}.json was built for {built_for}: run ./scripts/build.sh");
         }
         Ok(())
     }
 
-    /// The name and gap for the price covenant `price_id`.
-    pub fn name_gap(&self, price: &Template, price_id: Hash) -> Result<(Template, Template)> {
-        let name = compile_name_in(&self.root, &self.params, price, price_id);
-        let gap = compile_gap_in(&self.root, &self.params, &name, price, price_id);
-        self.check_artifact("priceCovenantId", price_id, "KachatName", &name)?;
-        self.check_artifact("priceCovenantId", price_id, "KachatGap", &gap)?;
+    /// The name and gap, with the params' register and renew tables baked in.
+    pub fn name_gap(&self) -> Result<(Template, Template)> {
+        let name = compile_name_in(&self.root, &self.params);
+        let gap = compile_gap_in(&self.root, &self.params, &name);
+        self.check_artifact("KachatName", &name, "other params or sources")?;
+        self.check_artifact("KachatGap", &gap, "other params or sources")?;
         Ok((name, gap))
     }
 
-    /// The kit for the price covenant `price_id` and the registry `registry_id`.
-    pub fn kit(&self, price_id: Hash, registry_id: Hash) -> Result<Kit> {
-        let price = self.price();
-        let (name, gap) = self.name_gap(&price, price_id)?;
+    /// The kit for the registry `registry_id`.
+    pub fn kit(&self, registry_id: Hash) -> Result<Kit> {
+        let (name, gap) = self.name_gap()?;
         let offer = compile_offer_in(&self.root, &self.params, &name, registry_id);
-        self.check_artifact("registryCovenantId", registry_id, "KachatOffer", &offer)?;
-        // the kit's authority is only a placeholder: the CLI builds shard inputs and
-        // outputs from the tracked shard states, never from it
-        Ok(Kit::with_registry(self.params.clone(), price, name, gap, offer, price_id, keypair(201), registry_id, consensus_params()))
+        // the offer artifact is built for the registry id params carry (other ids: tests, dry runs)
+        if params_registry_id(&self.root).as_deref() == Some(registry_id.to_string().as_str()) {
+            self.check_artifact("KachatOffer", &offer, &format!("another registry id than {registry_id}"))?;
+        }
+        Ok(Kit::with_registry(self.params.clone(), name, gap, offer, registry_id, consensus_params()))
     }
 }
 
@@ -137,7 +134,7 @@ pub struct Plan {
     pub lock_time: u64,
     pub input_labels: Vec<String>,
     pub output_labels: Vec<String>,
-    /// price paid as miner fee (register / extend / renew)
+    /// price paid as miner fee (register / extend / renew: the baked tables)
     pub price_fee: u64,
     pub network_fee: u64,
     /// local consensus validation at `block`: Ok(fee) or the rejection
@@ -152,8 +149,6 @@ pub struct Plan {
     pub new_offer: Option<OfferRec>,
     /// set by `genesis`
     pub registry_id: Option<Hash>,
-    /// set by `price-genesis`
-    pub price_id: Option<Hash>,
 }
 
 impl Plan {
@@ -332,7 +327,6 @@ fn finish(env: &Env, wallet: &[Utxo], mut d: Draft, payload: Vec<u8>, fee: Fee) 
         new_commit: None,
         new_offer: None,
         registry_id: None,
-        price_id: None,
     })
 }
 
@@ -346,15 +340,9 @@ pub fn name_payload(op: &str, name: &str) -> Vec<u8> {
     format!("kchat:1:name:{op}:{name}").into_bytes()
 }
 
-/// `kchat:1:offer:<keyHex>:<buyerXonlyHex>:<sellerXonlyHex>:<refundAfterDaa>` (registry v3)
+/// `kchat:1:offer:<keyHex>:<buyerXonlyHex>:<sellerXonlyHex>:<refundAfterDaa>` (since registry v3)
 pub fn offer_payload(f: &OfferFields) -> Vec<u8> {
     format!("kchat:1:offer:{}:{}:{}:{}", hex(&f.key), hex(&f.buyer), hex(&f.seller), f.refund_after).into_bytes()
-}
-
-/// Informational marker on a price change: `kchat:1:prices:<p1>:<p2>:<p3>:<p4>:<p5>:<authorityHex>`.
-pub fn prices_payload(prices: &[u64; 5], authority: &[u8; 32]) -> Vec<u8> {
-    let p: Vec<String> = prices.iter().map(u64::to_string).collect();
-    format!("kchat:1:prices:{}:{}", p.join(":"), hex(authority)).into_bytes()
 }
 
 // ---------------------------------------------------------------------------
@@ -388,14 +376,6 @@ fn check_live(label: &str, utxo: &Utxo, value: u64, registry: Option<Hash>) -> R
     Ok(())
 }
 
-/// A price shard's use() input and its unchanged continuation, authorized by `input_idx`.
-fn shard_read(env: &Env, shard: &PriceRec, utxo: &Utxo, input_idx: u16) -> Result<((Input, String), (TransactionOutput, String))> {
-    check_live(&format!("price shard {}", shard.shard), utxo, env.kit.params.price_value, Some(env.kit.price_id))?;
-    let input = Input::contract(utxo.clone(), &env.kit.price, shard.state(), "use", vec![]);
-    let output = env.kit.price_output(shard.shard, &shard.authority, &shard.prices, input_idx);
-    Ok(((input, format!("price shard {} use()", shard.shard)), (output, format!("price shard {} (unchanged)", shard.shard))))
-}
-
 fn require_owner(env: &Env, n: &NameRec) -> Result<()> {
     ensure!(
         n.fields.owner == env.me(),
@@ -411,91 +391,26 @@ fn require_owner(env: &Env, n: &NameRec) -> Result<()> {
 // genesis
 // ---------------------------------------------------------------------------
 
-/// One deployer UTXO worth at least `need` (the smallest such), else the largest.
-fn genesis_funding(wallet: &[Utxo], need: u64, me: &[u8; 32], what: &str) -> Result<Utxo> {
+/// The registry genesis (registry v4 has no other): spend one deployer UTXO (the
+/// smallest that covers the gap and a change, else the largest); output 0 is the lone
+/// genesis gap (00..00, ff..ff) bound to covenant_id(that outpoint, [(0, gap)]);
+/// output 1 is change. Nothing else is authorized.
+pub fn genesis(t: &Templates, deployer: Keypair, wallet: &[Utxo], block: Block, wall_ms: i64, feerate: f64) -> Result<(Plan, Kit)> {
+    let p = &t.params;
+    let (_, gap) = t.name_gap()?;
+    let me = xonly(&deployer);
+    let need = p.gap_value + TARGET_CHANGE;
     let funding = wallet
         .iter()
         .filter(|u| u.entry.amount >= need)
         .min_by_key(|u| u.entry.amount)
         .or_else(|| wallet.iter().max_by_key(|u| u.entry.amount))
         .cloned()
-        .ok_or_else(|| anyhow!("{what}: the deployer has no UTXO; fund {} first", p2pk_address(me)))?;
-    Ok(funding)
-}
-
-/// The price genesis (registry v3, first): spend one deployer UTXO; outputs
-/// 0..K-1 are the shards with the params' prices and `authority`, bound to
-/// covenant_id(that outpoint, [(i, shard_i)]); output K is change.
-pub fn price_genesis(
-    t: &Templates,
-    deployer: Keypair,
-    authority: &[u8; 32],
-    wallet: &[Utxo],
-    block: Block,
-    wall_ms: i64,
-    feerate: f64,
-) -> Result<(Plan, Kit)> {
-    let p = &t.params;
-    let price = t.price();
-    let me = xonly(&deployer);
-    let k = p.price_shards as usize;
-    let shards_value = p.price_value * k as u64;
-    let funding = genesis_funding(wallet, shards_value + TARGET_CHANGE, &me, "price genesis")?;
-    ensure!(
-        funding.entry.amount >= shards_value + MIN_CHANGE,
-        "price genesis: the largest deployer UTXO is only {} (needs {} for {k} shards + change)",
-        fmt_kas(funding.entry.amount),
-        fmt_kas(shards_value + MIN_CHANGE)
-    );
-    let change = TransactionOutput::new(funding.entry.amount - shards_value, p2pk_spk(&me));
-    let (spec, price_id) = price_genesis_spec(p, &price, authority, funding.clone(), deployer, vec![change]);
-    // a kit for this price id (the offer inside is never used here)
-    let kit = t.kit(price_id, price_id)?;
-    let env = Env { kit, deployer, block, wall_ms, feerate };
-    let mut outputs: Vec<(TransactionOutput, String)> = spec.outputs[..k]
-        .iter()
-        .enumerate()
-        .map(|(i, o)| (o.clone(), format!("price shard {i} (authority {}..)", hex(&authority[..4]))))
-        .collect();
-    outputs.push((spec.outputs[k].clone(), "change (deployer)".into()));
-    let d = Draft {
-        op: "price genesis".into(),
-        inputs: vec![(spec.inputs[0].clone(), "funding (deployer P2PK) = the price genesis outpoint".into())],
-        outputs,
-        lock_time: 0,
-        price_fee: 0,
-        notes: vec![
-            format!(
-                "price covenant id = covenant_id({}, [(i, shard_i)]) = {price_id}",
-                crate::util::fmt_outpoint(&funding.outpoint)
-            ),
-            format!(
-                "genesis prices per period (1/2/3/4/5+ chars): {}",
-                p.prices.iter().map(|x| fmt_kas(*x)).collect::<Vec<_>>().join(" / ")
-            ),
-            format!("authority (may change prices and itself): {}", p2pk_address(authority)),
-        ],
-    };
-    let mut plan = finish(&env, &[], d, vec![], Fee::FromOutput { idx: k, cap: None, floor: MIN_CHANGE })?;
-    plan.price_id = Some(price_id);
-    ensure!(plan.built.tx.outputs.iter().filter(|o| o.covenant.is_some()).count() == k, "the price genesis authorizes exactly the shards");
-    Ok((plan, env.kit))
-}
-
-/// The registry genesis (after the price genesis): spend one deployer UTXO; output 0
-/// is the lone genesis gap (00..00, ff..ff) bound to covenant_id(that outpoint,
-/// [(0, gap)]); output 1 is change. Nothing else is authorized.
-#[allow(clippy::too_many_arguments)]
-pub fn genesis(t: &Templates, price_id: Hash, deployer: Keypair, wallet: &[Utxo], block: Block, wall_ms: i64, feerate: f64) -> Result<(Plan, Kit)> {
-    let p = &t.params;
-    let price = t.price();
-    let (_, gap) = t.name_gap(&price, price_id)?;
-    let me = xonly(&deployer);
-    let funding = genesis_funding(wallet, p.gap_value + TARGET_CHANGE, &me, "genesis")?;
+        .ok_or_else(|| anyhow!("genesis: the deployer has no UTXO; fund {} first", p2pk_address(&me)))?;
     ensure!(funding.entry.amount >= p.gap_value + MIN_CHANGE, "genesis: the largest deployer UTXO is only {}", fmt_kas(funding.entry.amount));
     let change = TransactionOutput::new(funding.entry.amount - p.gap_value, p2pk_spk(&me));
     let (mut spec, registry_id) = genesis_spec(p, &gap, funding.clone(), deployer, vec![change]);
-    let kit = t.kit(price_id, registry_id)?;
+    let kit = t.kit(registry_id)?;
     let env = Env { kit, deployer, block, wall_ms, feerate };
     let fee = network_fee(&env, &env.kit.costs(&env.kit.build(&spec)));
     spec.outputs[1].value = funding.entry.amount - p.gap_value - fee;
@@ -511,13 +426,23 @@ pub fn genesis(t: &Templates, price_id: Hash, deployer: Keypair, wallet: &[Utxo]
         price_fee: 0,
         notes: vec![
             format!("registry covenant id = covenant_id({}, [(0, gap)]) = {registry_id}", crate::util::fmt_outpoint(&funding.outpoint)),
-            format!("the gap and the name read prices from the price covenant {price_id}"),
+            format!(
+                "prices baked into the gap and the name (per {}, 1/2/3/4/5+ chars): register {}; renew {}",
+                fmt_dur(p.period_ms),
+                fmt_tiers(&p.register_prices),
+                fmt_tiers(&p.renew_prices)
+            ),
         ],
     };
     let mut plan = finish(&env, &[], d, vec![], Fee::FromOutput { idx: 1, cap: None, floor: MIN_CHANGE })?;
     plan.registry_id = Some(registry_id);
     ensure!(plan.built.tx.outputs.iter().filter(|o| o.covenant.is_some()).count() == 1, "genesis authorizes exactly one output");
     Ok((plan, env.kit))
+}
+
+/// A price table for humans: the five tiers (1, 2, 3, 4, 5+ chars) joined by " / ".
+pub fn fmt_tiers(prices: &[u64; 5]) -> String {
+    prices.iter().map(|x| fmt_kas(*x)).collect::<Vec<_>>().join(" / ")
 }
 
 // ---------------------------------------------------------------------------
@@ -597,8 +522,6 @@ pub fn register(
     gap_utxo: &Utxo,
     commit: &CommitRec,
     commit_utxo: &Utxo,
-    shard: &PriceRec,
-    shard_utxo: &Utxo,
     years: i64,
     now: i64,
 ) -> Result<Plan> {
@@ -615,19 +538,21 @@ pub fn register(
     ensure!(commit_utxo.entry.script_public_key == pay_to_script_hash_script(&redeem), "commit UTXO script does not match the stored salt");
     ensure!(now > 0 && (now as u64) >= LOCK_TIME_THRESHOLD, "now must be a unix-ms timestamp");
 
-    let price = shard.price_for(name.len()) * years as u64;
+    // registry v4: the first period at the registration price, each further one at the
+    // renewal price (both baked into the gap)
+    let price = p.register_cost(name.len(), years);
     let expires = now + years * p.period_ms;
     let fields = NameFields::new(name.as_bytes(), &me, 0, now, expires);
     let mut commit_in = Input::new(commit_utxo.clone(), Unlock::Commit { redeem, key: env.deployer });
     commit_in.sequence = p.t_commit;
-    let (shard_in, shard_out) = shard_read(env, shard, shard_utxo, 2)?;
     let mut notes = vec![
         format!(
-            "price {} = {} x {years} period(s) of {} (price shard {}), left as miner fee",
+            "price {} = {} (first period) + {} x {} further period(s) of {}, left as miner fee",
             fmt_kas(price),
-            fmt_kas(shard.price_for(name.len())),
-            fmt_dur(p.period_ms),
-            shard.shard
+            fmt_kas(p.price_for(name.len())),
+            fmt_kas(p.renew_price_for(name.len())),
+            years - 1,
+            fmt_dur(p.period_ms)
         ),
         format!("now = periodStart = {now} ({}), expiresAt = {expires} ({})", fmt_ms(now), fmt_ms(expires)),
     ];
@@ -661,19 +586,16 @@ pub fn register(
                         int(years),
                         bytes(&env.kit.name.prefix),
                         bytes(&env.kit.name.suffix),
-                        int(2),
                     ],
                 ),
-                format!("{} register (price at input 2)", label_gap(&gap.lo, &gap.hi)),
+                format!("{} register", label_gap(&gap.lo, &gap.hi)),
             ),
             (commit_in, format!("commit for {name} (sequence = tCommit {})", p.t_commit)),
-            shard_in,
         ],
         outputs: vec![
             (env.kit.gap_output(&gap.lo, &key, 0), label_gap(&gap.lo, &key)),
             (env.kit.gap_output(&key, &gap.hi, 0), label_gap(&key, &gap.hi)),
             (env.kit.name_output(&fields, 0), format!("name {name} (owner deployer, expires {})", fmt_ms(expires))),
-            shard_out,
         ],
         lock_time: now as u64,
         price_fee: price,
@@ -714,10 +636,10 @@ pub fn renew_window_open(env: &Env, f: &NameFields) -> bool {
     (env.block.time_ms as i64) > renew_opens(&env.kit.params, f)
 }
 
-/// Anyone extends the current period: [name.extend(years, 1), price shard (use),
-/// funding] -> [continuation (periodStart kept, expiresAt + years periods), shard,
-/// change]. No lock time.
-pub fn extend(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo, shard: &PriceRec, shard_utxo: &Utxo, years: i64) -> Result<Plan> {
+/// Anyone extends the current period: [name.extend(years), funding] -> [continuation
+/// (periodStart kept, expiresAt + years periods), change], years x the renewal price as
+/// miner fee. No lock time.
+pub fn extend(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo, years: i64) -> Result<Plan> {
     let p = &env.kit.params;
     ensure!((1..=p.max_years).contains(&years), "years must be 1..{}", p.max_years);
     check_live(&n.name(), utxo, p.bond, Some(env.kit.registry_id))?;
@@ -735,20 +657,20 @@ pub fn extend(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo, shard: &Pric
         fmt_ms(renew_opens(p, f)),
         fmt_dur(p.renew_window_ms)
     );
-    let price = shard.price_for(name.len()) * years as u64;
+    let price = p.renew_price_for(name.len()) * years as u64;
     let nf = f.extended(years, p.period_ms);
-    let (shard_in, shard_out) = shard_read(env, shard, shard_utxo, 1)?;
     let d = Draft {
         op: format!("extend {name} ({years} period(s))"),
-        inputs: vec![
-            (name_input(env, n, utxo, "extend", vec![int(years), int(1)]), format!("name {name} extend({years}, price at input 1)")),
-            shard_in,
-        ],
-        outputs: vec![(env.kit.name_output(&nf, 0), format!("name {name} expires {}", fmt_ms(nf.expires_at))), shard_out],
+        inputs: vec![(name_input(env, n, utxo, "extend", vec![int(years)]), format!("name {name} extend({years})"))],
+        outputs: vec![(env.kit.name_output(&nf, 0), format!("name {name} expires {}", fmt_ms(nf.expires_at)))],
         lock_time: 0,
         price_fee: price,
         notes: vec![
-            format!("extension price {} left as miner fee", fmt_kas(price)),
+            format!(
+                "extension price {} = {} x {years} period(s) (the renewal price), left as miner fee",
+                fmt_kas(price),
+                fmt_kas(p.renew_price_for(name.len()))
+            ),
             format!(
                 "expiresAt {} -> {}; periodStart {} kept (at most {} periods past it)",
                 fmt_ms(f.expires_at),
@@ -763,10 +685,11 @@ pub fn extend(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo, shard: &Pric
 
 /// Anyone renews once the renewal window opened: [name.renew(years),
 /// funding] -> [continuation (periodStart = old expiresAt, expiresAt +
-/// years), change]. Lock time = [`renew_lock_time`] (timestamp domain), every
-/// input sequence 0 (not final, as the CLTV needs). Before the window opens
-/// the plan is built but rejected (not final); the CLI refuses to submit it.
-pub fn renew(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo, shard: &PriceRec, shard_utxo: &Utxo, years: i64) -> Result<Plan> {
+/// years), change], years x the renewal price as miner fee. Lock time =
+/// [`renew_lock_time`] (timestamp domain), every input sequence 0 (not final,
+/// as the CLTV needs). Before the window opens the plan is built but rejected
+/// (not final); the CLI refuses to submit it.
+pub fn renew(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo, years: i64) -> Result<Plan> {
     let p = &env.kit.params;
     ensure!((1..=p.max_years).contains(&years), "years must be 1..{}", p.max_years);
     check_live(&n.name(), utxo, p.bond, Some(env.kit.registry_id))?;
@@ -775,11 +698,10 @@ pub fn renew(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo, shard: &Price
     let opens = renew_opens(p, f);
     ensure!(opens >= 0 && opens as u64 >= LOCK_TIME_THRESHOLD, "{name}: expiresAt - renewWindowMs is not a timestamp");
     let lock = renew_lock_time(env, f);
-    let price = shard.price_for(name.len()) * years as u64;
+    let price = p.renew_price_for(name.len()) * years as u64;
     let nf = f.renewed(years, p.period_ms);
-    let (shard_in, shard_out) = shard_read(env, shard, shard_utxo, 1)?;
     let mut notes = vec![
-        format!("renewal price {} left as miner fee", fmt_kas(price)),
+        format!("renewal price {} = {} x {years} period(s), left as miner fee", fmt_kas(price), fmt_kas(p.renew_price_for(name.len()))),
         format!(
             "new period: periodStart {} -> {} (the old expiry), expiresAt -> {}",
             fmt_ms(f.period_start),
@@ -798,11 +720,8 @@ pub fn renew(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo, shard: &Price
     }
     let d = Draft {
         op: format!("renew {name} ({years} period(s))"),
-        inputs: vec![
-            (name_input(env, n, utxo, "renew", vec![int(years), int(1)]), format!("name {name} renew({years}, price at input 1)")),
-            shard_in,
-        ],
-        outputs: vec![(env.kit.name_output(&nf, 0), format!("name {name} expires {}", fmt_ms(nf.expires_at))), shard_out],
+        inputs: vec![(name_input(env, n, utxo, "renew", vec![int(years)]), format!("name {name} renew({years})"))],
+        outputs: vec![(env.kit.name_output(&nf, 0), format!("name {name} expires {}", fmt_ms(nf.expires_at)))],
         lock_time: lock as u64,
         price_fee: price,
         notes,
@@ -891,7 +810,7 @@ pub fn buy(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo) -> Result<Plan>
 // offers
 // ---------------------------------------------------------------------------
 
-/// An offer on a registered name, bound to its current owner (registry v3: only that
+/// An offer on a registered name, bound to its current owner (since registry v3: only that
 /// owner can accept or decline it; a change of owner ends it).
 pub fn offer(env: &Env, wallet: &[Utxo], name: &str, amount: u64, refund_after: u64, target: &NameRec) -> Result<Plan> {
     check_name(name)?;
@@ -945,7 +864,7 @@ pub fn accept_offer(env: &Env, n: &NameRec, name_utxo: &Utxo, o: &OfferRec, offe
     require_owner(env, n)?;
     ensure!(
         o.fields.seller == env.me(),
-        "that offer was made to {}, an earlier owner of {}: it can't be accepted (registry v3)",
+        "that offer was made to {}, an earlier owner of {}: it can't be accepted (an offer is bound to the owner it was made to)",
         p2pk_address(&o.fields.seller),
         n.name()
     );
@@ -973,7 +892,7 @@ pub fn accept_offer(env: &Env, n: &NameRec, name_utxo: &Utxo, o: &OfferRec, offe
     finish(env, &[], d, name_payload("accept", &name), Fee::FromOutput { idx: 1, cap: Some(env.kit.params.offer_max_fee), floor: MIN_CHANGE })
 }
 
-/// The seller turns an offer down (registry v3): [offer.decline(sellerSig)] alone ->
+/// The seller turns an offer down (since registry v3): [offer.decline(sellerSig)] alone ->
 /// [back to the buyer, the offer less the network fee (at most maxFee)].
 pub fn decline_offer(env: &Env, o: &OfferRec, utxo: &Utxo) -> Result<Plan> {
     ensure!(o.fields.seller == env.me(), "only the seller {} can decline this offer", p2pk_address(&o.fields.seller));
@@ -1108,68 +1027,4 @@ pub fn reclaim(env: &Env, x: ExitParts) -> Result<Plan> {
         notes,
     };
     finish(env, &[], d, name_payload("reclaim", &name), Fee::FromOutput { idx: 2, cap: None, floor: MIN_CHANGE })
-}
-
-// ---------------------------------------------------------------------------
-// the price record (registry v3)
-// ---------------------------------------------------------------------------
-
-/// The authority changes every shard at once: [shard 0 update(newAuthority, prices,
-/// authoritySig), shards 1..K-1 follow(), deployer funding] -> [K continuations, change].
-/// A price change passes the current authority; a key rotation the current prices.
-pub fn price_update(
-    env: &Env,
-    wallet: &[Utxo],
-    shards: &[(PriceRec, Utxo)],
-    authority: Keypair,
-    new_authority: &[u8; 32],
-    prices: &[u64; 5],
-) -> Result<Plan> {
-    let p = &env.kit.params;
-    let k = p.price_shards as usize;
-    let mut sorted: Vec<&(PriceRec, Utxo)> = shards.iter().collect();
-    sorted.sort_by_key(|(s, _)| s.shard);
-    ensure!(sorted.len() == k && sorted.iter().enumerate().all(|(i, (s, _))| s.shard == i as i64), "need every shard 0..{} (have {})", k - 1, sorted.len());
-    let cur = &sorted[0].0;
-    ensure!(
-        sorted.iter().all(|(s, _)| s.authority == cur.authority && s.prices == cur.prices),
-        "the tracked shards disagree; run `scan`"
-    );
-    ensure!(xonly(&authority) == cur.authority, "the authority key {} is not the price authority {}", p2pk_address(&xonly(&authority)), p2pk_address(&cur.authority));
-    ensure!(*new_authority != [0u8; 32], "the new authority can't be zero");
-    for x in prices {
-        ensure!(*x <= 100_000_000_000_000_000, "price above the cap (1e9 KAS)");
-    }
-    let mut inputs = vec![];
-    for (s, u) in &sorted {
-        check_live(&format!("price shard {}", s.shard), u, p.price_value, Some(env.kit.price_id))?;
-        let (entry, args, label) = if s.shard == 0 {
-            let mut a = vec![bytes(new_authority)];
-            a.extend(prices.iter().map(|x| int(*x as i64)));
-            a.push(Arg::Sig(authority));
-            ("update", a, "price shard 0 update (authority sig)".to_string())
-        } else {
-            ("follow", vec![], format!("price shard {} follow()", s.shard))
-        };
-        inputs.push((Input::contract(u.clone(), &env.kit.price, s.state(), entry, args), label));
-    }
-    let outputs: Vec<(TransactionOutput, String)> =
-        (0..k).map(|i| (env.kit.price_output(i as i64, new_authority, prices, i as u16), format!("price shard {i} (new state)"))).collect();
-    let mut notes = vec![];
-    if prices != &cur.prices {
-        notes.push(format!(
-            "prices per period (1/2/3/4/5+ chars): {} -> {}, in effect as soon as this is accepted",
-            cur.prices.iter().map(|x| fmt_kas(*x)).collect::<Vec<_>>().join(" / "),
-            prices.iter().map(|x| fmt_kas(*x)).collect::<Vec<_>>().join(" / ")
-        ));
-    }
-    if *new_authority != cur.authority {
-        notes.push(format!(
-            "authority {} -> {}: the old key can no longer change prices",
-            p2pk_address(&cur.authority),
-            p2pk_address(new_authority)
-        ));
-    }
-    let d = Draft { op: "price update".into(), inputs, outputs, lock_time: 0, price_fee: 0, notes };
-    finish(env, wallet, d, prices_payload(prices, new_authority), Fee::Funded { max_inputs: MAX_INPUTS })
 }

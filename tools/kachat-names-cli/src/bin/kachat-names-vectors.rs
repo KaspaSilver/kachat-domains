@@ -45,13 +45,12 @@ use kachat_names_cli::{
     ops::{self, Env, ExitParts, Plan, Templates},
     paths::Paths,
     plan::{Sim, Step, e2e_steps},
-    registry::{GapRec, NameRec, OfferRec, PriceRec},
+    registry::{GapRec, NameRec, OfferRec},
     util::{SOMPI, hex, parse_pushes},
 };
 use kachat_names_harness::{
     Block, FF32, NameFields, OfferFields, TransactionId, TransactionOutpoint, Utxo, UtxoEntry, YEAR_MS, ZERO32, commit_redeem,
-    commitment, gap_state, keypair, name_key, name_state, num8, offer_state, p2pk_spk, pad_name, price_state, push,
-    scenarios::NOW_MS, xonly,
+    commitment, gap_state, keypair, name_key, name_state, num8, offer_state, p2pk_spk, pad_name, push, scenarios::NOW_MS, xonly,
 };
 use kaspa_consensus_core::{
     hashing::{
@@ -67,28 +66,27 @@ use serde_json::{Value, json};
 
 /// The compute budgets an app without a script engine commits per entry
 /// (README "Cost per operation"): every budget the CLI measures must fit.
-/// Registry v3: register / extend / renew read a price shard (price.use), offers
-/// check the seller's signature, and a price change runs update + follow.
+/// Registry v4: no price input (the tables are baked), so register, merge, extend and
+/// renew are back to their v2 budgets (measured: register at most 85,837 script units,
+/// merge 46,918, extend / renew ~19,940, which budget 1's 19,999 covers by under 60
+/// units: 2 leaves room); offers check the seller's signature.
 const RECOMMENDED_BUDGETS: &[(&str, u16)] = &[
     ("p2pk", 10),
     ("commit", 10),
-    ("gap.register", 11),
-    ("gap.merge", 5),
+    ("gap.register", 8),
+    ("gap.merge", 4),
     ("gap.absorbed", 0),
     ("name.transfer", 12),
     ("name.list", 12),
     ("name.buy", 2),
-    ("name.extend", 3),
-    ("name.renew", 3),
+    ("name.extend", 2),
+    ("name.renew", 2),
     ("name.release", 10),
     ("name.reclaim", 0),
     ("offer.accept", 17),
     ("offer.decline", 10),
     ("offer.withdraw", 10),
     ("offer.refund", 0),
-    ("price.use", 1),
-    ("price.update", 16),
-    ("price.follow", 0),
 ];
 
 fn main() -> Result<()> {
@@ -105,7 +103,6 @@ fn main() -> Result<()> {
     let mut sim = Sim::new(Templates::load(&paths.root), 100 * SOMPI, wall);
     let mut steps = vec![];
     let mut manifest_json = Value::Null;
-    let mut price_record = Value::Null;
     let mut tags = vec![];
     for (step, _) in e2e_steps() {
         if matches!(step, Step::Wait(..)) {
@@ -116,16 +113,10 @@ fn main() -> Result<()> {
         let records = records_for(&sim, &step)?;
         sim.run(&step)?;
         let plan = sim.plans.last().unwrap();
-        if matches!(step, Step::PriceGenesis) {
-            let pid = plan.price_id.unwrap();
-            let kit = sim.templates.kit(pid, pid)?;
-            price_record = manifest::price_genesis_json(&kit, plan, &xonly(&sim.deployer), None)?;
-            continue;
-        }
         if matches!(step, Step::Genesis) {
             let kit = sim.kit.as_ref().unwrap();
             let deployer = p2pk_address(&xonly(&sim.deployer)).to_string();
-            manifest_json = manifest::build(&paths, kit, &price_record, plan, &deployer, None, true)?;
+            manifest_json = manifest::build(&paths, kit, plan, &deployer, None, true)?;
             tags = dispatch_tags(kit);
             continue;
         }
@@ -136,21 +127,16 @@ fn main() -> Result<()> {
             Step::TransferToSelf(_) => json!({ "newOwner": hex(&xonly(&sim.deployer)) }),
             Step::List(_, p) => json!({ "price": p }),
             Step::Offer(..) => offer_args(plan),
-            Step::SetPrices(num, den) => {
-                let prices = sim.templates.params.prices.map(|p| p * num / den);
-                json!({ "prices": prices, "newAuthority": hex(&xonly(&sim.deployer)) })
-            }
             _ => json!({}),
         };
         steps.push(step_json(op_name(&step), &before, records, args, plan, &tags)?);
     }
     let registry_id = sim.kit.as_ref().unwrap().registry_id;
-    let price_id = sim.kit.as_ref().unwrap().price_id;
     let templates_params = sim.kit.as_ref().unwrap().params.clone();
 
     // ---- edge cases on the same registry ---------------------------------
     let templates = Templates::load(&paths.root);
-    let extra = extra_cases(&templates, price_id, registry_id, wall, &tags)?;
+    let extra = extra_cases(&templates, registry_id, wall, &tags)?;
     steps.extend(extra);
 
     let v = json!({
@@ -167,20 +153,22 @@ fn main() -> Result<()> {
         "commitValue": ops::COMMIT_VALUE,
         "maxInputsFeeEntry": ops::MAX_IO_FEE_ENTRY,
         "maxInputs": ops::MAX_INPUTS,
-        "registry": "v3: prices read from a KachatPrice shard (price covenant), periodMs, offers bound to the seller (108 B state), decline",
+        "registry": "v4: fixed register and renew tables baked into KachatGap and KachatName (no price record), periodMs, offers bound to the seller (108 B state), decline",
         "registryCovenantId": hex(&registry_id.as_bytes()),
-        "priceCovenantId": hex(&price_id.as_bytes()),
         "maxYears": templates_params.max_years,
         "periodMs": templates_params.period_ms,
         "graceMs": templates_params.grace_ms,
         "renewWindowMs": templates_params.renew_window_ms,
-        "priceShards": templates_params.price_shards,
-        "priceValue": templates_params.price_value,
-        "genesisPrices": templates_params.prices,
+        "registerPrices": templates_params.register_prices,
+        "renewPrices": templates_params.renew_prices,
+        "priceRules": {
+            "tier": "index = clamp(name length in bytes, 1, 5) - 1 into registerPrices / renewPrices (1, 2, 3, 4, 5+ chars)",
+            "register": "priceFee = registerPrices[tier] + renewPrices[tier] * (years - 1)",
+            "extendRenew": "priceFee = renewPrices[tier] * years",
+        },
         "inputLayouts": {
-            "register": "0 gap.register(name, owner, salt, now, years, namePrefix, nameSuffix, priceIdx = 2), 1 commit, 2 price.use, 3.. funding; outputs 0 gap (lo,key), 1 gap (key,hi), 2 name, 3 the shard's continuation (authorized by input 2), change",
-            "extendRenew": "0 name.extend|renew(years, priceIdx = 1), 1 price.use, 2.. funding; outputs 0 name, 1 the shard's continuation (authorized by input 1), change",
-            "setPrices": "0 price.update(newAuthority, p1..p5, authoritySig) (shard 0), 1..K-1 price.follow() (shards in order), K.. funding; outputs 0..K-1 the shards' new states (shard i authorized by input i), change",
+            "register": "0 gap.register(name, owner, salt, now, years, namePrefix, nameSuffix), 1 commit, 2.. funding; outputs 0 gap (lo,key), 1 gap (key,hi), 2 name, change",
+            "extendRenew": "0 name.extend|renew(years), 1.. funding; outputs 0 name, change",
             "acceptOffer": "0 name.transfer(buyer, ownerSig), 1 offer.accept(0, sellerSig)",
             "declineOffer": "0 offer.decline(sellerSig), alone; one output back to the buyer",
         },
@@ -199,7 +187,7 @@ fn main() -> Result<()> {
             "address": p2pk_address(&xonly(&sim.deployer)).to_string(),
         },
         "manifest": manifest_json,
-        "codecs": codecs(&templates, price_id, registry_id)?,
+        "codecs": codecs(&templates, registry_id)?,
         "steps": steps,
     });
     std::fs::write(&out, serde_json::to_string_pretty(&v)? + "\n")?;
@@ -219,12 +207,11 @@ fn op_name(step: &Step) -> &'static str {
         Step::Offer(..) => "offer",
         Step::Accept(_) => "acceptOffer",
         Step::Decline(_) => "declineOffer",
-        Step::SetPrices(..) => "setPrices",
         Step::Refund(_) => "refundOffer",
         Step::Withdraw(_) => "withdrawOffer",
         Step::Release(_) => "release",
         Step::Reclaim(_) => "reclaim",
-        Step::PriceGenesis | Step::Genesis | Step::Wait(..) => unreachable!(),
+        Step::Genesis | Step::Wait(..) => unreachable!(),
     }
 }
 
@@ -275,17 +262,6 @@ fn name_json(n: &NameRec, u: &Utxo) -> Value {
     })
 }
 
-fn shard_json(s: &PriceRec, u: &Utxo) -> Value {
-    json!({
-        "shard": s.shard,
-        "authority": hex(&s.authority),
-        "prices": s.prices,
-        "value": s.value,
-        "state": hex(&s.state()),
-        "utxo": utxo_json(u),
-    })
-}
-
 fn offer_json(o: &OfferRec, u: &Utxo) -> Value {
     json!({
         "key": hex(&o.fields.key),
@@ -314,27 +290,11 @@ fn records_for(sim: &Sim, step: &Step) -> Result<Value> {
         Step::Register { name, .. } => {
             let c = find_open(&sim.commits, name, &me).ok_or_else(|| anyhow!("no commit"))?;
             let g = reg.gap_for_key(&name_key(name.as_bytes())).ok_or_else(|| anyhow!("no gap"))?;
-            let sh = sim.peek_shard().ok_or_else(|| anyhow!("no shard"))?;
-            json!({
-                "gap": gap_json(g, &live(sim, &g.outpoint)?),
-                "commit": commit_json(c, &live(sim, &c.outpoint.unwrap())?),
-                "shard": shard_json(&sh, &live(sim, &sh.outpoint)?),
-            })
+            json!({ "gap": gap_json(g, &live(sim, &g.outpoint)?), "commit": commit_json(c, &live(sim, &c.outpoint.unwrap())?) })
         }
-        Step::Extend(n, _) | Step::Renew(n, _) => {
-            let r = reg.name(n).ok_or_else(|| anyhow!("no name"))?;
-            let sh = sim.peek_shard().ok_or_else(|| anyhow!("no shard"))?;
-            json!({ "name": name_json(r, &live(sim, &r.outpoint)?), "shard": shard_json(&sh, &live(sim, &sh.outpoint)?) })
-        }
-        Step::TransferToSelf(n) | Step::List(n, _) | Step::Buy(n) => {
+        Step::Extend(n, _) | Step::Renew(n, _) | Step::TransferToSelf(n) | Step::List(n, _) | Step::Buy(n) => {
             let r = reg.name(n).ok_or_else(|| anyhow!("no name"))?;
             json!({ "name": name_json(r, &live(sim, &r.outpoint)?) })
-        }
-        Step::SetPrices(..) => {
-            let mut shards = reg.shards.clone();
-            shards.sort_by_key(|s| s.shard);
-            let v: Vec<Value> = shards.iter().map(|s| Ok(shard_json(s, &live(sim, &s.outpoint)?))).collect::<Result<_>>()?;
-            json!({ "shards": v })
         }
         Step::Offer(n, ..) => {
             let r = reg.name(n).ok_or_else(|| anyhow!("no name"))?;
@@ -392,9 +352,6 @@ fn dispatch_tags(kit: &kachat_names_harness::Kit) -> Vec<(String, String)> {
     }
     for e in ["accept", "decline", "withdraw", "refund"] {
         v.push((kit.offer.dispatch_tag(e), format!("offer.{e}")));
-    }
-    for e in ["use", "update", "follow"] {
-        v.push((kit.price.dispatch_tag(e), format!("price.{e}")));
     }
     v
 }
@@ -551,28 +508,23 @@ fn synthetic(tag: u8, index: u32, amount: u64, spk: ScriptPublicKey, daa: u64, c
     Utxo::new(TransactionOutpoint::new(TransactionId::from_bytes([tag; 32]), index), UtxoEntry::new(amount, spk, daa, false, cov))
 }
 
-fn extra_cases(t: &Templates, price_id: kaspa_hashes::Hash, registry_id: kaspa_hashes::Hash, wall: i64, tags: &[(String, String)]) -> Result<Vec<Value>> {
+fn extra_cases(t: &Templates, registry_id: kaspa_hashes::Hash, wall: i64, tags: &[(String, String)]) -> Result<Vec<Value>> {
     let deployer = keypair(77);
     let me = xonly(&deployer);
     let stranger = xonly(&keypair(5));
     let block = Block { daa: 600_000_000, time_ms: (wall - 132_000) as u64 };
-    let env = Env { kit: t.kit(price_id, registry_id)?, deployer, block, wall_ms: wall, feerate: ops::MIN_FEERATE };
+    let env = Env { kit: t.kit(registry_id)?, deployer, block, wall_ms: wall, feerate: ops::MIN_FEERATE };
     let id = Some(registry_id);
     let snap = |wallet: &[Utxo]| Snapshot { block, wall_ms: wall, wallet: wallet.to_vec(), deployer: me };
     let mut out = vec![];
     let p = &env.kit.params;
     let period = p.period_ms;
-    // a live price shard (genesis prices, the deployer as the authority), as a reader finds it
-    let shard = |n: i64, prices: [u64; 5], tag: u8| {
-        let u = synthetic(tag, n as u32, p.price_value, env.kit.price.spk(&price_state(n, &me, &prices)), block.daa - 3_000, Some(price_id));
-        (PriceRec { outpoint: u.outpoint, shard: n, authority: me, prices, value: p.price_value }, u)
-    };
 
-    // register a 32-character name for 2 periods from five small UTXOs (the 8-input bound)
+    // register a 32-character name for 2 periods from six small UTXOs (the 8-input bound)
     {
         let name = "abcdefghijklmnopqrstuvwxyz-01234";
         ensure!(name.len() == 32);
-        let wallet: Vec<Utxo> = (0..6).map(|i| synthetic(0xd0 + i, i as u32, 75_000_000, p2pk_spk(&me), block.daa - 5_000, None)).collect();
+        let wallet: Vec<Utxo> = (0..7).map(|i| synthetic(0xd0 + i, i as u32, 45_000_000, p2pk_spk(&me), block.daa - 5_000, None)).collect();
         let salt = [0x31; 32];
         let c = CommitRec { name: name.into(), owner: me, salt, value: ops::COMMIT_VALUE, outpoint: None, used_by: None, created_ms: 0 };
         let cu = synthetic(0xc1, 0, ops::COMMIT_VALUE, pay_to_script_hash_script(&commit_redeem(&commitment(name.as_bytes(), &me, &salt), &me)), block.daa - 700, None);
@@ -580,16 +532,16 @@ fn extra_cases(t: &Templates, price_id: kaspa_hashes::Hash, registry_id: kaspa_h
         let g = GapRec { outpoint: TransactionOutpoint::new(TransactionId::from_bytes([0xa1; 32]), 1), lo: ZERO32, hi: FF32, value: p.gap_value };
         let gu = synthetic(0xa1, 1, p.gap_value, env.kit.gap.spk(&gap_state(&ZERO32, &FF32)), block.daa - 900, id);
         let now = ops::register_now(&env);
-        let (sh, su) = shard(6, p.prices, 0xf6);
-        let plan = ops::register(&env, &wallet, &g, &gu, &c, &cu, &sh, &su, 2, now)?;
+        let plan = ops::register(&env, &wallet, &g, &gu, &c, &cu, 2, now)?;
         ensure!(plan.built.tx.inputs.len() == 8, "expected the 8-input bound, got {}", plan.built.tx.inputs.len());
+        ensure!(plan.price_fee == p.register_prices[4] + p.renew_prices[4], "2 periods: the 5+ registration price + one renewal");
         let args = json!({ "years": 2, "now": now });
-        let recs = json!({ "gap": gap_json(&g, &gu), "commit": commit_json(&c, &cu), "shard": shard_json(&sh, &su) });
+        let recs = json!({ "gap": gap_json(&g, &gu), "commit": commit_json(&c, &cu) });
         out.push(step_json("register", &snap(&wallet), recs, args, &plan, tags)?);
     }
 
-    // register a 1-character name (40 TKAS a period on testnet) inside a narrower gap, at
-    // prices the authority has raised x3 (shard 1 carries them)
+    // register a 1-character name for 2 periods (40 TKAS for the first on testnet, 10 for
+    // the second) inside a narrower gap
     {
         let name = "x";
         let key = name_key(name.as_bytes());
@@ -606,11 +558,10 @@ fn extra_cases(t: &Templates, price_id: kaspa_hashes::Hash, registry_id: kaspa_h
         let gu = synthetic(0xa2, 0, p.gap_value, env.kit.gap.spk(&gap_state(&lo, &hi)), block.daa - 900, id);
         let now = ops::register_now(&env);
         ensure!(lo < key && key < hi);
-        let (sh, su) = shard(1, p.prices.map(|x| x * 3), 0xf1);
-        let plan = ops::register(&env, &wallet, &g, &gu, &c, &cu, &sh, &su, 1, now)?;
-        ensure!(plan.price_fee == p.prices[0] * 3, "the 1-char price read from the shard");
-        let args = json!({ "years": 1, "now": now });
-        let recs = json!({ "gap": gap_json(&g, &gu), "commit": commit_json(&c, &cu), "shard": shard_json(&sh, &su) });
+        let plan = ops::register(&env, &wallet, &g, &gu, &c, &cu, 2, now)?;
+        ensure!(plan.price_fee == p.register_prices[0] + p.renew_prices[0], "the 1-char registration price + one 1-char renewal");
+        let args = json!({ "years": 2, "now": now });
+        let recs = json!({ "gap": gap_json(&g, &gu), "commit": commit_json(&c, &cu) });
         out.push(step_json("register", &snap(&wallet), recs, args, &plan, tags)?);
     }
 
@@ -658,7 +609,7 @@ fn extra_cases(t: &Templates, price_id: kaspa_hashes::Hash, registry_id: kaspa_h
         out.push(step_json("buy", &snap(&wallet), json!({ "name": name_json(&n, &u) }), json!({}), &plan, tags)?);
     }
 
-    // renew in grace: another owner's 4-character name, expired 5 minutes ago (grace is 10),
+    // renew in grace: another owner's 4-character name, expired 5 minutes ago (grace is 30),
     // for 2 periods
     {
         let e = wall - 5 * 60_000;
@@ -666,11 +617,10 @@ fn extra_cases(t: &Templates, price_id: kaspa_hashes::Hash, registry_id: kaspa_h
         let u = name_utxo(&f, 0xb4);
         let n = rec(f, &u);
         let w = vec![synthetic(0xe3, 0, 20 * SOMPI, p2pk_spk(&me), block.daa - 5_000, None)];
-        let (sh, su) = shard(4, p.prices, 0xf4);
-        let plan = ops::renew(&env, &w, &n, &u, &sh, &su, 2)?;
+        let plan = ops::renew(&env, &w, &n, &u, 2)?;
         ensure!(plan.built.tx.lock_time as i64 == ops::register_now(&env), "renew in grace: lock time = now - 3 min");
-        let recs = json!({ "name": name_json(&n, &u), "shard": shard_json(&sh, &su) });
-        out.push(step_json("renew", &snap(&w), recs, json!({ "years": 2 }), &plan, tags)?);
+        ensure!(plan.price_fee == 2 * p.renew_prices[3], "2 periods at the 4-char renewal price");
+        out.push(step_json("renew", &snap(&w), json!({ "name": name_json(&n, &u) }), json!({ "years": 2 }), &plan, tags)?);
     }
 
     // renew in the window: expires in 5 minutes (the window opened 5 minutes ago), 1 period
@@ -679,11 +629,9 @@ fn extra_cases(t: &Templates, price_id: kaspa_hashes::Hash, registry_id: kaspa_h
         let f = NameFields::new(b"in-window", &me, 0, e - period, e);
         let u = name_utxo(&f, 0xba);
         let n = rec(f, &u);
-        let (sh, su) = shard(5, p.prices, 0xf5);
-        let plan = ops::renew(&env, &wallet, &n, &u, &sh, &su, 1)?;
+        let plan = ops::renew(&env, &wallet, &n, &u, 1)?;
         ensure!(plan.built.tx.lock_time as i64 == ops::register_now(&env), "renew in the window: lock time = now - 3 min");
-        let recs = json!({ "name": name_json(&n, &u), "shard": shard_json(&sh, &su) });
-        out.push(step_json("renew", &snap(&wallet), recs, json!({ "years": 1 }), &plan, tags)?);
+        out.push(step_json("renew", &snap(&wallet), json!({ "name": name_json(&n, &u) }), json!({ "years": 1 }), &plan, tags)?);
     }
 
     // renew right as the window opens (30 s before the median time): now - 3 min
@@ -694,11 +642,9 @@ fn extra_cases(t: &Templates, price_id: kaspa_hashes::Hash, registry_id: kaspa_h
         let f = NameFields::new(b"just-opened", &me, 0, e - period, e);
         let u = name_utxo(&f, 0xbb);
         let n = rec(f, &u);
-        let (sh, su) = shard(7, p.prices, 0xf7);
-        let plan = ops::renew(&env, &wallet, &n, &u, &sh, &su, 1)?;
+        let plan = ops::renew(&env, &wallet, &n, &u, 1)?;
         ensure!(plan.built.tx.lock_time as i64 == opens, "renew at the window opening: lock time = expiresAt - renewWindowMs");
-        let recs = json!({ "name": name_json(&n, &u), "shard": shard_json(&sh, &su) });
-        out.push(step_json("renew", &snap(&wallet), recs, json!({ "years": 1 }), &plan, tags)?);
+        out.push(step_json("renew", &snap(&wallet), json!({ "name": name_json(&n, &u) }), json!({ "years": 1 }), &plan, tags)?);
     }
 
     // extend another owner's 1-period name (registered 2 minutes ago) to 2 periods (a gift)
@@ -707,11 +653,9 @@ fn extra_cases(t: &Templates, price_id: kaspa_hashes::Hash, registry_id: kaspa_h
         let f = NameFields::new(b"gift-two", &stranger, 0, start, start + period);
         let u = name_utxo(&f, 0xbc);
         let n = rec(f, &u);
-        let (sh, su) = shard(0, p.prices, 0xf0);
-        let plan = ops::extend(&env, &wallet, &n, &u, &sh, &su, 1)?;
+        let plan = ops::extend(&env, &wallet, &n, &u, 1)?;
         ensure!(plan.built.tx.lock_time == 0);
-        let recs = json!({ "name": name_json(&n, &u), "shard": shard_json(&sh, &su) });
-        out.push(step_json("extend", &snap(&wallet), recs, json!({ "years": 1 }), &plan, tags)?);
+        out.push(step_json("extend", &snap(&wallet), json!({ "name": name_json(&n, &u) }), json!({ "years": 1 }), &plan, tags)?);
     }
 
     // accept another buyer's offer (made to the deployer: the seller signs)
@@ -741,18 +685,12 @@ fn extra_cases(t: &Templates, price_id: kaspa_hashes::Hash, registry_id: kaspa_h
         out.push(step_json("declineOffer", &snap(&[]), json!({ "offer": offer_json(&o, &ou) }), json!({}), &plan, tags)?);
     }
 
-    // rotate the price authority to another key (prices unchanged)
+    // anyone reclaims another owner's lapsed name (expired 45 minutes ago, 15 past its
+    // 30-minute grace); the caller keeps the bounty
     {
-        let shards: Vec<(PriceRec, Utxo)> = (0..p.price_shards).map(|i| shard(i, p.prices, 0x90 + i as u8)).collect();
-        let plan = ops::price_update(&env, &wallet, &shards, deployer, &stranger, &p.prices)?;
-        let recs = json!({ "shards": shards.iter().map(|(s, u)| shard_json(s, u)).collect::<Vec<_>>() });
-        let args = json!({ "prices": p.prices, "newAuthority": hex(&stranger) });
-        out.push(step_json("setPrices", &snap(&wallet), recs, args, &plan, tags)?);
-    }
-
-    // anyone reclaims another owner's lapsed name; the caller keeps the bounty
-    {
-        let f = NameFields::new(b"lapsed", &stranger, 0, wall - 30 * 60_000 - period, wall - 30 * 60_000);
+        let expired = wall - 45 * 60_000;
+        ensure!(expired + p.grace_ms < block.time_ms as i64, "the lapsed name must be past expiresAt + grace at the median time");
+        let f = NameFields::new(b"lapsed", &stranger, 0, expired - period, expired);
         let key = f.key;
         let u = name_utxo(&f, 0xb7);
         let n = rec(f, &u);
@@ -793,8 +731,8 @@ fn builder() -> ScriptBuilder {
     ScriptBuilder::with_flags(EngineFlags { covenants_enabled: true, ..Default::default() })
 }
 
-fn codecs(t: &Templates, price_id: kaspa_hashes::Hash, registry_id: kaspa_hashes::Hash) -> Result<Value> {
-    let kit = t.kit(price_id, registry_id)?;
+fn codecs(t: &Templates, registry_id: kaspa_hashes::Hash) -> Result<Value> {
+    let kit = t.kit(registry_id)?;
     let names = ["a", "x", "z9", "abc", "four", "alice", "alpha-tn", "bravo-tn", "lapse-tn", "a-b", "0", "kachat", "abcdefghijklmnopqrstuvwxyz-01234"];
     let owner = xonly(&keypair(77));
     let name_keys: Vec<Value> = names
@@ -835,8 +773,6 @@ fn codecs(t: &Templates, price_id: kaspa_hashes::Hash, registry_id: kaspa_hashes
     let nf = NameFields::new(b"alice", &owner, 5 * SOMPI as i64, NOW_MS, NOW_MS + YEAR_MS);
     let seller = xonly(&keypair(5));
     let of = OfferFields { key: name_key(b"alice"), buyer: owner, seller, refund_after: 600_100_000 };
-    let pp = kit.params.prices;
-    let ps = price_state(3, &owner, &pp);
     let states = json!({
         "gap": { "lo": hex(&ZERO32), "hi": hex(&FF32), "state": hex(&gap_s), "spk": hex(kit.gap.spk(&gap_s).script()) },
         "name": {
@@ -850,12 +786,6 @@ fn codecs(t: &Templates, price_id: kaspa_hashes::Hash, registry_id: kaspa_hashes
             "layout": "0x20 key 0x20 buyer 0x20 seller 0x08 refundAfter (108 bytes)",
             "state": hex(&offer_state(&of.key, &of.buyer, &of.seller, of.refund_after)),
             "spk": hex(kit.offer.spk(&of.encode()).script()),
-        },
-        "price": {
-            "shard": 3, "authority": hex(&owner), "prices": pp,
-            "layout": "0x08 shard 0x20 authority 0x08 p1 0x08 p2 0x08 p3 0x08 p4 0x08 p5 (87 bytes)",
-            "state": hex(&ps),
-            "spk": hex(kit.price.spk(&ps).script()),
         },
     });
     // covenant ids
@@ -916,8 +846,7 @@ fn check(file: &std::path::Path) -> Result<()> {
     let paths = Paths::find(None)?;
     let v: Value = serde_json::from_str(&std::fs::read_to_string(file)?)?;
     let registry_id = h32(&v["registryCovenantId"])?;
-    let price_id = h32(&v["priceCovenantId"])?;
-    let kit: Kit = Templates::load(&paths.root).kit(price_id, registry_id)?;
+    let kit: Kit = Templates::load(&paths.root).kit(registry_id)?;
     let signer = keypair(77);
     ensure!(hex(&xonly(&signer)) == v["signer"].as_str().unwrap_or(""), "the port signed for another key than the vectors' deployer");
     let placeholder: Vec<u8> = [&[0x41u8][..], &[0u8; 64], &[0x01]].concat();

@@ -33,23 +33,8 @@ fn ensure_secrets_dir(paths: &Paths) -> Result<()> {
 
 /// Create the deployer key. Refuses to overwrite an existing one.
 pub fn keygen(paths: &Paths) -> Result<Keypair> {
-    keygen_at(paths, &paths.deployer_key())
-}
-
-/// Create the testnet price authority key (registry v3). On mainnet the authority
-/// lives on KasSigner and never on this machine; this CLI has no mainnet mode.
-pub fn authority_keygen(paths: &Paths) -> Result<Keypair> {
-    keygen_at(paths, &paths.authority_key())
-}
-
-/// Load the testnet price authority key (mode 600).
-pub fn load_authority(paths: &Paths) -> Result<Keypair> {
-    load_at(paths, &paths.authority_key(), "authority-keygen")
-}
-
-fn keygen_at(paths: &Paths, path: &std::path::Path) -> Result<Keypair> {
     ensure_secrets_dir(paths)?;
-    let path = path.to_path_buf();
+    let path = paths.deployer_key();
     if path.exists() {
         bail!("{} already exists; refusing to overwrite it", paths.rel(&path));
     }
@@ -69,12 +54,8 @@ fn keygen_at(paths: &Paths, path: &std::path::Path) -> Result<Keypair> {
 
 /// Load the deployer key (and only that key). The file must be mode 600.
 pub fn load(paths: &Paths) -> Result<Keypair> {
-    load_at(paths, &paths.deployer_key(), "keygen")
-}
-
-fn load_at(paths: &Paths, path: &std::path::Path, create_with: &str) -> Result<Keypair> {
-    let path = path.to_path_buf();
-    let meta = fs::metadata(&path).with_context(|| format!("{} not found; run `{create_with}` first", paths.rel(&path)))?;
+    let path = paths.deployer_key();
+    let meta = fs::metadata(&path).with_context(|| format!("{} not found; run `keygen` first", paths.rel(&path)))?;
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {
         bail!("{} has mode {mode:o}; chmod 600 it", paths.rel(&path));
