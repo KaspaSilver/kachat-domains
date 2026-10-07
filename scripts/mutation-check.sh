@@ -41,11 +41,11 @@ mutate $G 'return first + next * (years - 1);' 'return first * years;' "gap: fur
 mutate $G 'first = reg1;' 'first = reg2;' "gap: tier 1 registration price"
 mutate $G 'first = reg3;' 'first = reg4;' "gap: tier 3 registration price"
 mutate $G 'next = renew2;' 'next = renew3;' "gap: tier 2 renewal price"
-mutate $G 'int p = ps.p5;
-        if (len == 1) {
-            p = ps.p1;' 'int p = ps.p5;
-        if (len == 1) {
-            p = ps.p5;' "gap: 1-char tier"
+mutate $G 'if (len == 1) {
+            first = reg1;
+            next = renew1;' 'if (len == 1) {
+            first = reg5;
+            next = renew5;' "gap: 1-char tier (both tables)"
 mutate $G 'require(lessThan(lo, newKey), "lo < key");' '' "gap: lo < key"
 mutate $G 'require(lessThan(newKey, hi), "key < hi");' '' "gap: key < hi"
 mutate $G 'require(charset[unsigned(n[i])] == 0x01, "name charset");' '' "gap: charset"
