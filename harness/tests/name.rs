@@ -476,8 +476,8 @@ fn anyone_may_extend_and_renew_a_name_as_a_gift() {
 fn renew_at_the_window_boundary_passes() {
     let kit = Kit::new();
     let n = name_case(&kit, b"alice", 0);
-    // one period on the testnet clock (10 days on mainnet)
-    assert_eq!(kit.params.renew_window_ms, PERIOD);
+    // 2 hours on the testnet day clock (30 days on mainnet)
+    assert_eq!(kit.params.renew_window_ms, RENEW_WINDOW);
     // lock time exactly expiresAt - window, in the first block whose median time passes it
     let spec = renew(&kit, &n, 1);
     assert_eq!(spec.lock_time as i64, n.fields.expires_at - kit.params.renew_window_ms);

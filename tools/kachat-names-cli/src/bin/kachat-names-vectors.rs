@@ -609,7 +609,7 @@ fn extra_cases(t: &Templates, registry_id: kaspa_hashes::Hash, wall: i64, tags: 
         out.push(step_json("buy", &snap(&wallet), json!({ "name": name_json(&n, &u) }), json!({}), &plan, tags)?);
     }
 
-    // renew in grace: another owner's 4-character name, expired 5 minutes ago (grace is 30),
+    // renew in grace: another owner's 4-character name, expired 5 minutes ago (grace is 6 hours),
     // for 2 periods
     {
         let e = wall - 5 * 60_000;
@@ -685,10 +685,10 @@ fn extra_cases(t: &Templates, registry_id: kaspa_hashes::Hash, wall: i64, tags: 
         out.push(step_json("declineOffer", &snap(&[]), json!({ "offer": offer_json(&o, &ou) }), json!({}), &plan, tags)?);
     }
 
-    // anyone reclaims another owner's lapsed name (expired 45 minutes ago, 15 past its
-    // 30-minute grace); the caller keeps the bounty
+    // anyone reclaims another owner's lapsed name (expired 15 minutes past its grace: 6 hours
+    // on the testnet day clock); the caller keeps the bounty
     {
-        let expired = wall - 45 * 60_000;
+        let expired = wall - p.grace_ms - 15 * 60_000;
         ensure!(expired + p.grace_ms < block.time_ms as i64, "the lapsed name must be past expiresAt + grace at the median time");
         let f = NameFields::new(b"lapsed", &stranger, 0, expired - period, expired);
         let key = f.key;

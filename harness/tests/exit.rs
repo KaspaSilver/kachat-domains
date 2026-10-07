@@ -180,12 +180,12 @@ fn reclaim_after_grace_returns_the_bond_to_the_last_owner() {
 }
 
 #[test]
-fn grace_is_three_periods_on_the_testnet_clock() {
-    // registry v4: 30 minutes on testnet (90 days on mainnet, params/mainnet.json)
+fn grace_is_six_hours_on_the_testnet_clock() {
+    // registry v4: 6 hours on testnet (90 days on mainnet, params/mainnet.json)
     let kit = Kit::new();
-    assert_eq!(kit.params.grace_ms, 3 * PERIOD);
+    assert_eq!(kit.params.grace_ms, GRACE);
     let e = reclaim(&kit, b"alice");
-    assert_eq!(e.spec.lock_time as i64, e.n.fields.expires_at + 30 * 60_000);
+    assert_eq!(e.spec.lock_time as i64, e.n.fields.expires_at + 6 * 3_600_000);
 }
 
 #[test]

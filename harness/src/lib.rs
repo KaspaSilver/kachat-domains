@@ -47,7 +47,7 @@ pub use silverscript_abi::ArtifactValue;
 use silverscript_abi::{SilAbiArtifact, encode_contract_entry_sig_script};
 
 pub const SOMPI_PER_KAS: u64 = 100_000_000;
-/// A mainnet period (registry v3 bakes `periodMs`; testnet runs a 10-minute clock).
+/// A mainnet period (registry v3 bakes `periodMs`; testnet runs a 24-hour clock).
 pub const YEAR_MS: i64 = 31_536_000_000;
 /// Default compute budget used while measuring an input that fails (attack tests).
 const FALLBACK_BUDGET: u16 = 1_000;
@@ -73,7 +73,7 @@ pub struct NetParams {
     pub t_commit: u64,
     /// most periods a registration / extension may prepay
     pub max_years: i64,
-    /// one paid period, ms (a year on mainnet, 10 minutes on testnet)
+    /// one paid period, ms (a year on mainnet, 24 hours on testnet)
     pub period_ms: i64,
     pub grace_ms: i64,
     /// renew is valid from expiresAt - renew_window_ms on

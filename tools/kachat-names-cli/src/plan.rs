@@ -46,13 +46,13 @@ pub const A: &str = "alpha-tn";
 pub const B: &str = "bravo-tn";
 pub const L: &str = "lapse-tn";
 
-/// On the testnet short clock (10-minute periods, 30-minute grace), backdating
-/// `now` by 65 minutes makes a 1-period name expire 55 minutes ago: its renewal
-/// window is long open, so `renew` (a new period from the old expiry) runs at
-/// once and leaves it expired 45 minutes ago, 15 minutes past expiresAt + grace,
-/// so `reclaim` is valid at once. The gap only proves `now` is not in the
+/// On the testnet day clock (24-hour periods, 6-hour grace), backdating `now` by
+/// 55 hours makes a 1-period name expire 31 hours ago: its renewal window is long
+/// open, so `renew` (a new period from the old expiry) runs at once and leaves it
+/// expired 7 hours ago, an hour past expiresAt + grace, so `reclaim` is valid at
+/// once. The gap only proves `now` is not in the
 /// future, so a backdated registration is valid (it pays for periods already over).
-pub const LAPSE_BACKDATE_MINUTES: i64 = 65;
+pub const LAPSE_BACKDATE_MINUTES: i64 = 55 * 60;
 
 pub fn e2e_steps() -> Vec<(Step, &'static str)> {
     use Step::*;
@@ -64,9 +64,9 @@ pub fn e2e_steps() -> Vec<(Step, &'static str)> {
         (Wait(600, "commit maturity: tCommit = 600 DAA (~1 min)"), "consensus sequence lock on input 1"),
         (Register { name: A, years: 1, backdate_minutes: 0 }, "register 1 period (0.35 TKAS miner fee: the 5+ registration price); time-locked tx (lockTime = now) is final"),
         (Register { name: B, years: 2, backdate_minutes: 0 }, "register 2 periods (0.35 + 0.0875 TKAS: the second at the renewal price) in the gap the first name left"),
-        (Register { name: L, years: 1, backdate_minutes: LAPSE_BACKDATE_MINUTES }, "backdated register: expired 55 minutes ago, past its 30-minute grace"),
+        (Register { name: L, years: 1, backdate_minutes: LAPSE_BACKDATE_MINUTES }, "backdated register: expired 31 hours ago, past its 6-hour grace"),
         (Extend(A, 1), "anyone extends: 1 -> 2 periods (the most a name holds), periodStart kept, 0.0875 TKAS (the renewal price)"),
-        (Renew(L, 1), "anyone renews after lapse: timestamp lock time past expiresAt - 10 min; new period from the old expiry, still lapsed; 0.0875 TKAS"),
+        (Renew(L, 1), "anyone renews after lapse: timestamp lock time past expiresAt - 2 h; new period from the old expiry, still lapsed; 0.0875 TKAS"),
         (TransferToSelf(A), "owner-signed transfer, continuation keeps bond, periodStart and expiry"),
         (List(A, 50 * SOMPI), "owner lists at 50 TKAS"),
         (Buy(A), "anyone buys: payout output right after the continuation; listing cleared"),

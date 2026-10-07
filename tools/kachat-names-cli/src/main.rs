@@ -73,8 +73,8 @@ enum Cmd {
         name: String,
         #[arg(long, default_value_t = 1)]
         years: i64,
-        /// move `now` this many minutes into the past (testing reclaim on the 10-minute clock
-        /// with its 30-minute grace: 65 leaves a 1-period name lapsed even after one renewal)
+        /// move `now` this many minutes into the past (testing reclaim on the testnet day clock
+        /// with its 6-hour grace: 3300 (55 h) leaves a 1-period name lapsed even after one renewal)
         #[arg(long, default_value_t = 0)]
         backdate_minutes: i64,
     },
@@ -800,8 +800,9 @@ fn e2e_plan(paths: &Paths, simulate: bool) -> Result<()> {
     println!("#");
     let t = Templates::load(&paths.root);
     println!(
-        "# names: alpha-tn, bravo-tn, lapse-tn (8 characters: the 5+ tier, {} to register for a first 10-minute period, {} per further period)",
+        "# names: alpha-tn, bravo-tn, lapse-tn (8 characters: the 5+ tier, {} to register for a first period of {}, {} per further period)",
         fmt_kas(t.params.price_for(8)),
+        fmt_dur(t.params.period_ms),
         fmt_kas(t.params.renew_price_for(8))
     );
     println!("# simulated with {} (every transaction built and validated locally, each spending the previous outputs):", fmt_kas(b.funding));

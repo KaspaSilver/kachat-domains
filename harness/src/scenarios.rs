@@ -12,8 +12,12 @@ pub const NOW_MS: i64 = 1_790_000_000_000;
 pub const NET_FEE: u64 = 1_000_000;
 pub const COMMIT_VALUE: u64 = 20_000_000;
 /// One paid period on the testnet-10 short clock (params/testnet10.json
-/// `periodMs`; the genesis tests check they agree).
-pub const PERIOD: i64 = 600_000;
+/// `periodMs`, a day; the genesis tests check they agree).
+pub const PERIOD: i64 = 86_400_000;
+/// The testnet-10 renewal window: 2 hours before the expiry (`renewWindowMs`).
+pub const RENEW_WINDOW: i64 = 7_200_000;
+/// The testnet-10 grace after the expiry: 6 hours (`graceMs`).
+pub const GRACE: i64 = 21_600_000;
 
 pub fn kas(n: u64) -> u64 {
     n * SOMPI_PER_KAS
@@ -150,7 +154,7 @@ impl NameCase {
 }
 
 /// A block well inside the name's paid period (10 s after NOW_MS: inside even
-/// the testnet's 10-minute period).
+/// the testnet's 24-hour period).
 pub fn active_block() -> Block {
     Block { daa: COMMIT_DAA + 10_000, time_ms: NOW_MS as u64 + 10_000 }
 }

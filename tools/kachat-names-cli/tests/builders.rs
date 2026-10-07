@@ -15,7 +15,7 @@ use kachat_names_cli::{
 use kachat_names_harness::{
     Block, FF32, Kit, NameFields, OfferFields, TransactionId, TransactionOutpoint, TransactionOutput, Utxo, UtxoEntry, YEAR_MS, ZERO32,
     commit_redeem, commitment, gap_state, keypair, name_key, p2pk_spk,
-    scenarios::{self, COMMIT_DAA, NOW_MS, PERIOD, active_block, neighbours},
+    scenarios::{self, COMMIT_DAA, NOW_MS, PERIOD, RENEW_WINDOW, active_block, neighbours},
     xonly,
 };
 use kaspa_txscript::pay_to_script_hash_script;
@@ -261,13 +261,13 @@ fn extend_is_capped_at_max_years_past_period_start() {
 fn renew_waits_for_its_window() {
     let base = harness_env(active_block());
     let w = wallet(&base, 200, 2);
-    // a name paid 2 periods ahead: on the testnet clock the window (one period before the
-    // expiry) opens 10 minutes in; a 1-period name's is open from the start
+    // a name paid 2 periods ahead: on the testnet day clock the window (2 hours before the
+    // expiry) opens 46 hours in
     let fields = NameFields::new(b"alice", &base.me(), 0, NOW_MS, NOW_MS + 2 * PERIOD);
     let u = reg_utxo(&base, base.kit.name.spk(&fields.encode()), base.kit.params.bond, 30);
     let n = NameRec { outpoint: u.outpoint, fields, value: base.kit.params.bond };
     let opens = ops::renew_opens(&base.kit.params, &n.fields);
-    assert_eq!(opens, n.fields.expires_at - PERIOD); // one period on the testnet clock
+    assert_eq!(opens, n.fields.expires_at - RENEW_WINDOW); // 2 hours on the testnet clock
 
     // long before the window: built, but not final (lock time = the window
     // opening, above the median time), with a note saying when it opens

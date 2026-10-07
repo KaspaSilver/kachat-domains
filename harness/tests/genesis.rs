@@ -18,10 +18,11 @@ fn genesis_mints_the_lone_gap_under_the_registry_id() {
 
 #[test]
 fn testnet_runs_the_short_clock() {
-    // params/testnet10.json (registry v4): 10-minute periods, a one-period renewal window
-    // (it can't be longer than a period) and 30 minutes of grace
+    // params/testnet10.json (registry v4): mainnet scaled to a day per "year" - 24-hour
+    // periods, a 2-hour renewal window and 6 hours of grace
     let p = NetParams::load("testnet10");
-    assert_eq!((p.period_ms, p.renew_window_ms, p.grace_ms, p.max_years), (PERIOD, PERIOD, 3 * PERIOD, 2));
+    assert_eq!((p.period_ms, p.renew_window_ms, p.grace_ms, p.max_years), (PERIOD, RENEW_WINDOW, GRACE, 2));
+    assert_eq!((PERIOD, RENEW_WINDOW, GRACE), (24 * 3_600_000, 2 * 3_600_000, 6 * 3_600_000));
     // mainnet: a year, a 30-day renewal window, 90 days of grace
     let m = NetParams::load("mainnet");
     assert_eq!((m.period_ms, m.renew_window_ms, m.grace_ms), (YEAR_MS, 30 * 86_400_000, 90 * 86_400_000));
