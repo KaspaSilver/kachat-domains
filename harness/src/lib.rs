@@ -572,6 +572,11 @@ fn tier_args(prices: &[u64; 5]) -> Vec<ArtifactValue> {
 /// Compile KachatName with the params' renew table (what scripts/build.py does).
 pub fn compile_name_in(root: &Path, params: &NetParams) -> Template {
     let src = std::fs::read_to_string(root.join("contracts/KachatName.sil")).unwrap();
+    compile_source(&src, &name_args(params))
+}
+
+/// KachatName's constructor arguments, in declaration order.
+pub fn name_args(params: &NetParams) -> Vec<ArtifactValue> {
     let mut args = vec![
         ArtifactValue::Bytes(ZERO32.to_vec()),
         ArtifactValue::Bytes(ZERO32.to_vec()),
@@ -586,12 +591,17 @@ pub fn compile_name_in(root: &Path, params: &NetParams) -> Template {
         ArtifactValue::Int(params.period_ms),
     ];
     args.extend(tier_args(&params.renew_prices));
-    compile_source(&src, &args)
+    args
 }
 
 /// Compile KachatGap for `name` with the params' register and renew tables.
 pub fn compile_gap_in(root: &Path, params: &NetParams, name: &Template) -> Template {
     let src = std::fs::read_to_string(root.join("contracts/KachatGap.sil")).unwrap();
+    compile_source(&src, &gap_args(params, name))
+}
+
+/// KachatGap's constructor arguments, in declaration order.
+pub fn gap_args(params: &NetParams, name: &Template) -> Vec<ArtifactValue> {
     let mut args = vec![
         ArtifactValue::Bytes(ZERO32.to_vec()),
         ArtifactValue::Bytes(FF32.to_vec()),
@@ -606,7 +616,7 @@ pub fn compile_gap_in(root: &Path, params: &NetParams, name: &Template) -> Templ
     ];
     args.extend(tier_args(&params.register_prices));
     args.extend(tier_args(&params.renew_prices));
-    compile_source(&src, &args)
+    args
 }
 
 /// Compile KachatOffer for `registry_id` with the pinned compiler library
@@ -618,7 +628,12 @@ pub fn compile_offer(params: &NetParams, name: &Template, registry_id: Hash) -> 
 /// [`compile_offer`] reading `contracts/KachatOffer.sil` under `root`.
 pub fn compile_offer_in(root: &Path, params: &NetParams, name: &Template, registry_id: Hash) -> Template {
     let src = std::fs::read_to_string(root.join("contracts/KachatOffer.sil")).unwrap();
-    let args = vec![
+    compile_source(&src, &offer_args(params, name, registry_id))
+}
+
+/// KachatOffer's constructor arguments, in declaration order.
+pub fn offer_args(params: &NetParams, name: &Template, registry_id: Hash) -> Vec<ArtifactValue> {
+    vec![
         ArtifactValue::Bytes(ZERO32.to_vec()),
         ArtifactValue::Bytes(ZERO32.to_vec()),
         ArtifactValue::Bytes(ZERO32.to_vec()),
@@ -628,8 +643,7 @@ pub fn compile_offer_in(root: &Path, params: &NetParams, name: &Template, regist
         ArtifactValue::Int(name.prefix.len() as i64),
         ArtifactValue::Int(name.suffix.len() as i64),
         ArtifactValue::Int(params.offer_max_fee as i64),
-    ];
-    compile_source(&src, &args)
+    ]
 }
 
 pub fn compile_source(src: &str, args: &[ArtifactValue]) -> Template {
