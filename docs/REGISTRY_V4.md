@@ -1,6 +1,7 @@
 # .kachat registry v4 (proposal)
 
-**Status (2026-10-07):** a design for the owner to review. No contract code yet. v3 stays live
+**Status (2026-10-07):** design approved by the owner (decisions in section 7). Contract work
+starts on the `v4` branch. v3 stays live
 on testnet-10 until a v4 genesis replaces it. Nothing is on mainnet.
 
 **Why v4, and why now.** A template can never change, so every fix means a new registry. Mainnet
@@ -15,8 +16,8 @@ changes worth making before mainnet into **one** more genesis and **one** audit.
 | 2 | **Two tables: registering and renewing.** Short names cost more to register than to keep. | A high first price stops bots from buying every 1–3 letter name at launch. A low renewal means owners of rare names aren't annoyed every year (the "4000 KAS a year" problem). |
 | 3 | **90-day grace and a 30-day renewal window** on mainnet (v3: 10 and 10 days). | Missing a renewal by two weeks should not lose a name. Owner's decision, 2026-10-07. |
 | 4 | **Migration by snapshot import** (section 3). | A bug after launch can be fixed by a new version that carries every name over, with no trusted key. |
-| 5 | *(Optional)* **`takeover`** on the name (section 4). | Claiming an expired name takes 2 transactions instead of 3 (reclaim, commit, register), and no reclaim step or bounty is needed. |
-| 6 | *(Owner decides)* **Where the price goes** (section 5). | v3 pays it to miners as a fee. |
+| 5 | ~~`takeover`~~ - **not in v4** (owner, 2026-10-07; section 4). | The app already hides the reclaim step. |
+| 6 | **The price stays a miner fee**, as in v3 (owner, 2026-10-07; section 5). | No new key and no unspendable outputs. |
 
 Kept from v3: commit-reveal registration, the gap registry (one owner per name by consensus),
 trustless list and buy, seller-bound offers and `decline`, `periodMs` (testnet keeps its
@@ -35,24 +36,28 @@ Prices are sompi per period, by name length in bytes. They are baked into `Kacha
 (register table) and `KachatName.extend` / `renew` (renew table). Changing them takes a new version
 plus a migration, so they must be right at launch.
 
-**Example only. The owner picks the numbers** (KAS per year; v3 mainnet, for comparison, is one
-table of 4000 / 2000 / 1000 / 250 / 35):
+**The tables (owner, 2026-10-07).** Register keeps v3's mainnet numbers; renewing costs a quarter
+of that. KAS per period: a year on mainnet. Testnet-10 uses 1/100 of these per 10-minute period,
+as v3 does.
 
-| Length | Register | Renew |
-|---|---|---|
-| 1 | 1000 | 50 |
-| 2 | 500 | 25 |
-| 3 | 200 | 10 |
-| 4 | 50 | 5 |
-| 5+ | 5 | 2 |
+| Length | Register (mainnet) | Renew (mainnet) | Register (testnet) | Renew (testnet) |
+|---|---|---|---|---|
+| 1 | 4000 | 1000 | 40 | 10 |
+| 2 | 2000 | 500 | 20 | 5 |
+| 3 | 1000 | 250 | 10 | 2.5 |
+| 4 | 250 | 62.5 | 2.5 | 0.625 |
+| 5+ | 35 | 8.75 | 0.35 | 0.0875 |
+
+In sompi (mainnet): register `400000000000, 200000000000, 100000000000, 25000000000, 3500000000`;
+renew `100000000000, 50000000000, 25000000000, 6250000000, 875000000`.
 
 What to weigh:
 - **KAS moves.** A fixed KAS price drifts in dollars. A migration can reset prices, but it moves
   every name, so it's a rare, emergency-only step.
-- **Extend.** `extend` (adding a period inside the current one) uses the renew table. Otherwise
-  someone could register for one period and extend instead of paying the register price for two.
-  That's fine as long as the register price is for a single period: registering for 2 periods
-  costs register + renew.
+- **Extend.** `extend` (adding a period inside the current one) and `renew` use the renew table.
+  So `register` charges the register price for the **first** period and the renew price for each
+  further one: registering for 2 periods costs register + renew. Otherwise registering for one
+  period and extending would be cheaper than registering for two.
 
 ## 3. Migration: a new version imports a snapshot of the old one
 
@@ -97,7 +102,10 @@ Open question: whether silverc unrolls a fixed-depth Merkle check within the scr
 operation limits. Prototype this first. If a 20-level proof doesn't fit, use a shallower tree with
 wider leaves (several names per leaf).
 
-## 4. `takeover` (optional)
+## 4. `takeover` (not in v4)
+
+**Owner, 2026-10-07: no.** Kept here for the record, in case a later version wants it.
+
 
 A name entry on `KachatName`, allowed once `tx.time >= expiresAt + grace`:
 - **Inputs:** input 0 is the name; input 1 is a mature commit for `(name, newOwner, salt)`, the
@@ -113,7 +121,7 @@ A name entry on `KachatName`, allowed once `tx.time >= expiresAt + grace`:
 - **Without it,** the app already hides the 3-step reclaim (KaChat "Available" tab, 2026-10-07),
   so this is cleanliness, not a fix.
 
-## 5. Where the price goes (owner decides)
+## 5. Where the price goes: miners (owner, 2026-10-07)
 
 | Option | Effect |
 |---|---|
@@ -121,15 +129,15 @@ A name entry on `KachatName`, allowed once `tx.time >= expiresAt + grace`:
 | Burn | An output no key can ever spend. Nobody gets it back, but it stays in the UTXO set forever (it's large, so its storage mass is small). |
 | Treasury | A P2PK the project controls. That funds the project, but it's another key to protect, and it reads as a fee to the team. |
 
-The current lean is to keep the miner fee unless there's another reason to change it.
+**Decided: the miner fee, as in v3.**
 
 ## 6. What v4 means for each part
 
 - **Contracts.**
   - `KachatPrice` goes.
-  - `KachatGap` gets the register table, the snapshot root and deadline (when importing), and
-    `import`.
-  - `KachatName` gets the renew table, the new windows and optionally `takeover`.
+  - `KachatGap` gets the register table (first period) and the renew table (further periods).
+    No `import` in v4 (decision 4).
+  - `KachatName` gets the renew table and the new windows (no `takeover`, decision 3).
   - `KachatOffer` is unchanged apart from the new template hashes.
 - **Genesis:** a single registry genesis, with no price genesis. As always, a dry run comes first,
   then the owner's "send it".
@@ -137,31 +145,31 @@ The current lean is to keep the miner fee unless there's another reason to chang
   pinned in the app per deployment, as now.
 - **iOS app:**
   - prices come from the manifest again, with no shard read and no "price changed" stage;
-  - new windows: `expiresSoonMs` follows `renewWindowMs`;
-  - the `import` driver;
-  - optionally a `takeover` path in the claim driver.
+  - new windows: `expiresSoonMs` follows `renewWindowMs`.
 - **Indexer:**
   - remove the price shards (`/names/prices` serves the manifest tables);
-  - add the `import` and `takeover` events.
+  - follow the new template hashes; the events are unchanged.
 - **Android, Desktop and the extension:** they haven't ported v3 yet (XP-001), so v4 becomes their
   target directly.
 - **Testnet:** v3 names are left behind, as v1's and v2's were.
 
-## 7. Owner decisions before any code
+## 7. Owner decisions (2026-10-07)
 
-1. The two price tables (section 2).
-2. Where the price goes: miner fee, burn or treasury (section 5).
-3. `takeover`: yes or no (section 4).
-4. Ship `import` live in v4 for testnet v3 names: yes or no (recommended no; the harness
-   prototype either way).
-5. Testnet clock values for the new windows (proposal: `graceMs` 30 min, `renewWindowMs` 20 min
-   on the 10-minute period).
+1. **Prices:** register 4000 / 2000 / 1000 / 250 / 35 KAS, renew 1000 / 500 / 250 / 62.5 / 8.75
+   KAS per year (section 2).
+2. **Price destination:** miners, as in v3 (section 5).
+3. **`takeover`:** no (section 4).
+4. **`import` live in v4:** no. Testnet v3 names are left behind. The Merkle proof is still
+   prototyped in the harness so the next version's migration is proven before mainnet needs it.
+5. **Testnet windows:** `graceMs` 30 minutes, `renewWindowMs` 20 minutes, on the 10-minute
+   period. Mainnet: 90 days and 30 days.
 
 ## 8. Order of work
 
-1. Owner decisions (section 7).
-2. Prototype the Merkle proof in silverc and the harness. Section 3 depends on it.
-3. Contracts, harness scenarios and mutation pairs.
+1. ~~Owner decisions (section 7).~~ Done 2026-10-07.
+2. Contracts (`KachatPrice` out, two tables, new windows), harness scenarios and mutation pairs.
+3. Prototype the Merkle proof in silverc and the harness (proves section 3 for the next version;
+   not shipped in v4).
 4. CLI: genesis, snapshot, test vectors.
 5. Testnet dry run, then "send it".
 6. iOS, then the indexer handoff, then Android, Desktop and the extension.
