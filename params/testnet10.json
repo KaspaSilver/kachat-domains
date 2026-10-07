@@ -10,9 +10,9 @@
   "gapValue": 100000000,
   "tCommit": 600,
   "maxYears": 2,
-  "periodMs": 600000,
-  "graceMs": 1800000,
-  "renewWindowMs": 600000,
+  "periodMs": 86400000,
+  "graceMs": 21600000,
+  "renewWindowMs": 7200000,
   "prices": {
     "register": {
       "len1": 4000000000,
@@ -34,5 +34,5 @@
     "lo": "0000000000000000000000000000000000000000000000000000000000000000",
     "hi": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
   },
-  "registryCovenantId": "bff185546af1940ec70d74143e23b5f018fdb864bd02e15ca9b4c8d8ede40e2f"
+  "registryCovenantId": "e6b7244831004e1db928458bce570347317b50ff124c010d342d73a6c2017f0d"
 }

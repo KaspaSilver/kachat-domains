@@ -20,8 +20,8 @@ changes worth making before mainnet into **one** more genesis and **one** audit.
 | 6 | **The price stays a miner fee**, as in v3 (owner, 2026-10-07; section 5). | No new key and no unspendable outputs. |
 
 Kept from v3: commit-reveal registration, the gap registry (one owner per name by consensus),
-trustless list and buy, seller-bound offers and `decline`, `periodMs` (testnet keeps its
-10-minute clock), the 2-period cap ahead of the current period, `reclaim` and `release`.
+trustless list and buy, seller-bound offers and `decline`, `periodMs` (testnet runs a short
+clock: 10 minutes at first, 24 hours since 2026-10-07), the 2-period cap ahead of the current period, `reclaim` and `release`.
 
 Considered and dropped:
 - **An authority key with a time delay.** It still trusts a key. The owner chose fixed prices.
@@ -37,8 +37,8 @@ Prices are sompi per period, by name length in bytes. They are baked into `Kacha
 plus a migration, so they must be right at launch.
 
 **The tables (owner, 2026-10-07).** Register keeps v3's mainnet numbers; renewing costs a quarter
-of that. KAS per period: a year on mainnet. Testnet-10 uses 1/100 of these per 10-minute period,
-as v3 does.
+of that. KAS per period: a year on mainnet. Testnet-10 uses 1/100 of these per 24-hour period
+(per 10-minute period on the first v4 deployment).
 
 | Length | Register (mainnet) | Renew (mainnet) | Register (testnet) | Renew (testnet) |
 |---|---|---|---|---|
@@ -161,8 +161,13 @@ A name entry on `KachatName`, allowed once `tx.time >= expiresAt + grace`:
 3. **`takeover`:** no (section 4).
 4. **`import` live in v4:** no. Testnet v3 names are left behind. The Merkle proof is still
    prototyped in the harness so the next version's migration is proven before mainnet needs it.
-5. **Testnet windows:** `graceMs` 30 minutes, `renewWindowMs` 20 minutes, on the 10-minute
-   period. Mainnet: 90 days and 30 days.
+5. **Testnet windows:** `graceMs` 30 minutes, `renewWindowMs` 10 minutes, on the 10-minute
+   period (the window can't exceed a period). Mainnet: 90 days and 30 days.
+   **Redeployed 2026-10-07 on a day clock** (owner: names must live long enough to rehearse a
+   migration): mainnet scaled to one day per "year" - `periodMs` 24 hours, `graceMs` 6 hours,
+   `renewWindowMs` 2 hours. Same contracts, new testnet params, so a new genesis
+   (`5ffdd006…a777`, registry `e6b72448…7f0d`); the 10-minute deployment is archived in
+   `manifests/v4-10min/`.
 
 ## 8. Order of work
 
