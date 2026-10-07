@@ -18,9 +18,10 @@ pragma silverscript ^0.1.0;
 //
 // Baked parameters: bond (exact value of every name UTXO), maxYears,
 // graceMs, renewWindowMs, periodMs (one paid period: a year on mainnet, 10
-// minutes on the testnet short clock), and the price record (priceCovId,
-// priceTemplateHash, pricePrefixLen, priceSuffixLen): registry v3 reads the
-// renewal price per period from a KachatPrice shard spent alongside.
+// minutes on the testnet short clock), and renew1 .. renew5: the price per
+// period for extend and renew, by name length (registry v4: fixed, no price
+// record and no authority key; KachatGap charges the same table for every
+// period after the first).
 //
 // Names are paid per period, and never more than maxYears periods ahead of
 // the current period's start (KACHAT_NAMES.md 4.1; "years" below are periods):
@@ -48,10 +49,11 @@ contract KachatName(
     int graceMs,
     int renewWindowMs,
     int periodMs,
-    byte[32] priceCovId,
-    byte[32] priceTemplateHash,
-    int pricePrefixLen,
-    int priceSuffixLen
+    int renew1,
+    int renew2,
+    int renew3,
+    int renew4,
+    int renew5
 ) {
     // Highest asking price accepted by list(): the total KAS supply in sompi.
     int constant MAX_PRICE = 2900000000000000000;
@@ -62,17 +64,6 @@ contract KachatName(
     int constant MAX_INPUTS = 8;
     int constant MAX_OUTPUTS = 8;
     int constant MAX_IO_VALUE = 1000000000000000000;
-
-    // Layout of the KachatPrice runtime state (must match KachatPrice.sil).
-    struct PriceState {
-        int shard;
-        byte[32] authority;
-        int p1;
-        int p2;
-        int p3;
-        int p4;
-        int p5;
-    }
 
     byte[32] key = initKey;
     byte[32] name = initName;
@@ -135,23 +126,17 @@ contract KachatName(
     }
 
     // The price per period for this name's length (the padded name is a run of
-    // non-zero bytes followed by zeros), from the price shard at input
-    // `priceIdx`: it must carry the price covenant id (a real shard) and the
-    // price template.
-    function renewPrice(int priceIdx): int {
-        require(priceIdx >= 0, "price index");
-        require(priceIdx < tx.inputs.length, "price index");
-        require(OpInputCovenantId(priceIdx) == priceCovId, "price record");
-        PriceState ps = readInputStateWithTemplate(priceIdx, pricePrefixLen, priceSuffixLen, priceTemplateHash);
-        int p = ps.p5;
+    // non-zero bytes followed by zeros).
+    function renewPrice(): int {
+        int p = renew5;
         if (name[1] == 0x00) {
-            p = ps.p1;
+            p = renew1;
         } else if (name[2] == 0x00) {
-            p = ps.p2;
+            p = renew2;
         } else if (name[3] == 0x00) {
-            p = ps.p3;
+            p = renew3;
         } else if (name[4] == 0x00) {
-            p = ps.p4;
+            p = renew4;
         }
         return p;
     }
@@ -191,30 +176,30 @@ contract KachatName(
 
     // Anyone may extend the current period (gifting allowed), any time, as
     // long as the name stays paid at most maxYears periods past periodStart:
-    // years * the price (from the shard at priceIdx) is left to the miner.
-    entry extend(int years, int priceIdx) {
+    // years * the renewal price is left to the miner.
+    entry extend(int years) {
         require(years >= 1, "years >= 1");
         require(years <= maxYears, "years <= maxYears");
         require(expiresAt <= MAX_EXPIRES_AT, "expiry cap");
         int newExpiry = expiresAt + years * periodMs;
         require(newExpiry <= periodStart + maxYears * periodMs, "at most maxYears past periodStart");
         int out = soloContinuation();
-        require(minerFee() >= renewPrice(priceIdx) * years, "extension paid as miner fee");
+        require(minerFee() >= renewPrice() * years, "extension paid as miner fee");
         validateOutputState(out, State { key: key, name: name, owner: owner, price: price, periodStart: periodStart, expiresAt: newExpiry });
     }
 
     // Anyone may renew a name (gifting allowed) once its renewal window has
     // opened: tx.time >= expiresAt - renewWindowMs (timestamp CLTV; also in
     // grace and after lapse, until someone reclaims). The new period starts
-    // at the old expiry, so no time is lost or gained. years * the price (from
-    // the shard at priceIdx) is left to the miner.
-    entry renew(int years, int priceIdx) {
+    // at the old expiry, so no time is lost or gained. years * the renewal
+    // price is left to the miner.
+    entry renew(int years) {
         require(years >= 1, "years >= 1");
         require(years <= maxYears, "years <= maxYears");
         require(expiresAt <= MAX_EXPIRES_AT, "expiry cap");
         require(tx.time >= temporal(expiresAt - renewWindowMs));
         int out = soloContinuation();
-        require(minerFee() >= renewPrice(priceIdx) * years, "renewal paid as miner fee");
+        require(minerFee() >= renewPrice() * years, "renewal paid as miner fee");
         validateOutputState(out, State { key: key, name: name, owner: owner, price: price, periodStart: expiresAt, expiresAt: expiresAt + years * periodMs });
     }
 

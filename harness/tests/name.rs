@@ -460,10 +460,10 @@ fn anyone_may_extend_and_renew_a_name_as_a_gift() {
     let kit = Kit::new();
     let n = name_case(&kit, b"alice", 0);
     let spec = extend(&kit, &n, 1);
-    assert!(matches!(&spec.inputs[2].unlock, Unlock::P2pk(k) if xonly(k) != n.fields.owner));
+    assert!(matches!(&spec.inputs[1].unlock, Unlock::P2pk(k) if xonly(k) != n.fields.owner));
     ok(&kit, &spec, active_block());
     let spec = renew(&kit, &n, 1);
-    assert!(matches!(&spec.inputs[2].unlock, Unlock::P2pk(k) if xonly(k) != n.fields.owner));
+    assert!(matches!(&spec.inputs[1].unlock, Unlock::P2pk(k) if xonly(k) != n.fields.owner));
     ok(&kit, &spec, window_block(&kit, &n));
     // the owner is unchanged by either
     assert_eq!(n.fields.extended(1, PERIOD).owner, n.fields.owner);
@@ -659,12 +659,12 @@ fn two_renewals_cannot_share_one_fee() {
     let a = name_case(&kit, b"alice", 0);
     let bf = NameFields::new(b"bobby", &a.fields.owner, 0, NOW_MS, NOW_MS + PERIOD);
     let mut spec = renew(&kit, &a, 1);
-    // bobby at input 3 reads the same shard (input 1)
-    spec.inputs.push(Input::contract(kit.name_utxo(&bf, 26), &kit.name, bf.encode(), "renew", vec![int(1), int(PAID_PRICE_IDX as i64)]));
-    spec.outputs.insert(1, kit.name_output(&bf.renewed(1, PERIOD), 3));
+    // bobby at input 2 rides on alice's fee
+    spec.inputs.push(Input::contract(kit.name_utxo(&bf, 26), &kit.name, bf.encode(), "renew", vec![int(1)]));
+    spec.outputs.insert(1, kit.name_output(&bf.renewed(1, PERIOD), 2));
     let built = kit.build(&spec);
     let res = built.run_inputs();
-    assert!(res[0].is_err() && res[3].is_err(), "{res:?}");
+    assert!(res[0].is_err() && res[2].is_err(), "{res:?}");
     assert!(kit.validate(&built, window_block(&kit, &a)).is_err());
 }
 
@@ -674,11 +674,11 @@ fn an_extend_and_a_renew_cannot_share_one_fee() {
     let a = name_case(&kit, b"alice", 0);
     let bf = NameFields::new(b"bobby", &a.fields.owner, 0, NOW_MS, NOW_MS + PERIOD);
     let mut spec = renew(&kit, &a, 1);
-    spec.inputs.push(Input::contract(kit.name_utxo(&bf, 26), &kit.name, bf.encode(), "extend", vec![int(1), int(PAID_PRICE_IDX as i64)]));
-    spec.outputs.insert(1, kit.name_output(&bf.extended(1, PERIOD), 3));
+    spec.inputs.push(Input::contract(kit.name_utxo(&bf, 26), &kit.name, bf.encode(), "extend", vec![int(1)]));
+    spec.outputs.insert(1, kit.name_output(&bf.extended(1, PERIOD), 2));
     let built = kit.build(&spec);
     let res = built.run_inputs();
-    assert!(res[0].is_err() && res[3].is_err(), "{res:?}");
+    assert!(res[0].is_err() && res[2].is_err(), "{res:?}");
     assert!(kit.validate(&built, window_block(&kit, &a)).is_err());
 }
 
@@ -688,11 +688,11 @@ fn renew_and_extend_reject_more_than_eight_inputs() {
     let n = name_case(&kit, b"alice", 0);
     let payer = keypair(3);
     for (mut spec, blk) in [(renew(&kit, &n, 1), window_block(&kit, &n)), (extend(&kit, &n, 1), active_block())] {
-        // [name, price shard, funding] + 6 = 9
-        for t in 0..6u8 {
+        // [name, funding] + 7 = 9
+        for t in 0..7u8 {
             spec.inputs.push(Input::new(kit.p2pk_utxo(&payer, kas(1), 110 + t), Unlock::P2pk(payer)));
         }
-        spec.outputs.last_mut().unwrap().value += kas(6);
+        spec.outputs.last_mut().unwrap().value += kas(7);
         assert_eq!(spec.inputs.len(), 9);
         input_fails(&kit, &spec, blk, 0);
     }

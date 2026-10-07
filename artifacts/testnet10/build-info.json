@@ -1,6 +1,6 @@
 {
   "network": "testnet-10",
-  "registryVersion": 3,
+  "registryVersion": 4,
   "compiler": {
     "repo": "https://github.com/kaspanet/silverscript",
     "tag": "v1.0.0",
@@ -12,94 +12,68 @@
     "tCommit": 600,
     "maxYears": 2,
     "periodMs": 600000,
-    "graceMs": 600000,
+    "graceMs": 1800000,
     "renewWindowMs": 600000,
     "prices": {
-      "len1": 4000000000,
-      "len2": 2000000000,
-      "len3": 1000000000,
-      "len4": 250000000,
-      "len5plus": 35000000
+      "register": {
+        "len1": 4000000000,
+        "len2": 2000000000,
+        "len3": 1000000000,
+        "len4": 250000000,
+        "len5plus": 35000000
+      },
+      "renew": {
+        "len1": 1000000000,
+        "len2": 500000000,
+        "len3": 250000000,
+        "len4": 62500000,
+        "len5plus": 8750000
+      }
     },
-    "priceShards": 8,
-    "priceValue": 100000000,
     "offerMaxFee": 2000000,
     "genesisGap": {
       "lo": "0000000000000000000000000000000000000000000000000000000000000000",
       "hi": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
     }
   },
-  "priceCovenantId": "4d7685c06d5e3d37d8670fd68f7ac19b9d558398f3af268b310e9ad673f93338",
-  "registryCovenantId": "90f56bd1babeda8e901639eaffacd9dba211c32d3f4f2587916f419140ee6d24",
+  "registryCovenantId": null,
   "contracts": {
-    "KachatPrice": {
-      "bytecodeLen": 1691,
-      "stateSpan": {
-        "offset": 1,
-        "len": 87
-      },
-      "prefixLen": 1,
-      "suffixLen": 1603,
-      "templateHash": "d225c3a302b91866a8a7cb09d513b3375715794adf4f1e05eec872b32cb781d3",
-      "dispatchTags": {
-        "follow": "e823f7f1",
-        "update": "330d4c0b",
-        "use": "418a030f"
-      },
-      "bytecodeSha256": "afa8dfb72e946fd639066111511e92536e34d59d4caa5b88789f8956920532c6"
-    },
     "KachatName": {
-      "bytecodeLen": 4058,
+      "bytecodeLen": 3090,
       "stateSpan": {
         "offset": 1,
         "len": 126
       },
       "prefixLen": 1,
-      "suffixLen": 3931,
-      "templateHash": "973dba9aaa58ba8f59ac28a4dc45001209fae7708a89ffbcf49c1bc1ba5adfc4",
+      "suffixLen": 2963,
+      "templateHash": "394204b612f345787412156521c0aabbd36bba30311f008302964d4c4ece685a",
       "dispatchTags": {
         "buy": "76a02eb9",
-        "extend": "ed8d84c6",
+        "extend": "2ce7cceb",
         "list": "674a8ea4",
         "reclaim": "f56af4df",
         "release": "388ad0b4",
-        "renew": "6daae613",
+        "renew": "b706ac38",
         "transfer": "794dca54"
       },
-      "bytecodeSha256": "753939b50ad7eb17c59a91c4ac8fa311a207dbf4a9d4dd2418c7f1559a47d157"
+      "bytecodeSha256": "864c63937a27aa727c6b5367dc83356c1fb31de2b555d5abe1605ccda0646211"
     },
     "KachatGap": {
-      "bytecodeLen": 4498,
+      "bytecodeLen": 4057,
       "stateSpan": {
         "offset": 1,
         "len": 66
       },
       "prefixLen": 1,
-      "suffixLen": 4431,
-      "templateHash": "3c2c0f4f076da46f401ee19ea232580207c1c2bcd5cbdb626ead0b7f7693a157",
+      "suffixLen": 3990,
+      "templateHash": "85cf57f8d300331c2acc5191794065d60fafdd29cac90e3b82e3e1ba1c3876f0",
       "dispatchTags": {
         "absorbed": "dab76355",
         "merge": "63d25bc2",
-        "register": "0e5c563d"
+        "register": "8667af5e"
       },
-      "bytecodeSha256": "cc909abde2b470f09e0c49df515d6332b8edfa34c89848d8207e0b72bb43f2e2"
+      "bytecodeSha256": "5715f086963a9cb84ce2ae1f06a66fa5e84e6cfbef3ba5f79e1023d251857269"
     },
-    "KachatOffer": {
-      "bytecodeLen": 1114,
-      "stateSpan": {
-        "offset": 1,
-        "len": 108
-      },
-      "prefixLen": 1,
-      "suffixLen": 1005,
-      "templateHash": "8d6f8cdd287b2776b4c763691f28ffc08cdbe1552d2d7b7acdce8400268d1be5",
-      "dispatchTags": {
-        "accept": "2e18ed39",
-        "decline": "aead5037",
-        "refund": "777f5b11",
-        "withdraw": "80344ff1"
-      },
-      "bytecodeSha256": "c46474b1d9345a7137884f882cb1f2f36f384fe04191eb978f0c487d5280427d"
-    }
+    "KachatOffer": "not built: set registryCovenantId after the registry genesis"
   }
 }

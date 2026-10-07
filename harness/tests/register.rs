@@ -46,21 +46,45 @@ fn registers_several_years_up_front() {
     for years in [2, kit.params.max_years] {
         let r = register(&kit, b"alice", years);
         assert_eq!(r.name_fields(PERIOD).expires_at, NOW_MS + years * PERIOD);
-        assert_eq!(r.fee() as u64, kit.params.price_for(5) * years as u64 + NET_FEE);
+        assert_eq!(r.fee() as u64, kit.params.register_cost(5, years) + NET_FEE);
         ok(&kit, &r.spec, r.block);
     }
 }
 
 #[test]
 fn multi_year_registration_must_pay_every_year() {
-    // max years (2), paying one sompi short of 2 years (far more than 1 year)
+    // max years (2), paying one sompi short of the first period plus a renewal (far more
+    // than 1 period)
     let kit = Kit::new();
     let mut r = register(&kit, b"bob", kit.params.max_years);
     r.adjust_fee(-(NET_FEE as i64));
-    assert_eq!(r.fee() as u64, kit.params.price_for(3) * kit.params.max_years as u64);
+    assert_eq!(r.fee() as u64, kit.params.price_for(3) + kit.params.renew_price_for(3) * (kit.params.max_years as u64 - 1));
     ok(&kit, &r.spec, r.block);
     r.adjust_fee(-1);
     gap_fails(&kit, &r);
+}
+
+#[test]
+fn register_charges_the_registration_price_once_then_the_renewal_price() {
+    // registry v4: for every length tier, 1 period costs exactly the registration price and 2
+    // periods the registration price plus one renewal; a sompi less is refused
+    let kit = Kit::new();
+    let p = &kit.params;
+    for name in [&b"a"[..], b"ab", b"abc", b"abcd", b"abcde", b"kaspa-silver-0123456789-abcdefgh"] {
+        for years in [1, p.max_years] {
+            let mut r = register(&kit, name, years);
+            r.adjust_fee(-(NET_FEE as i64));
+            let due = p.price_for(name.len()) + p.renew_price_for(name.len()) * (years as u64 - 1);
+            assert_eq!(r.fee() as u64, due, "{} x{years}", String::from_utf8_lossy(name));
+            ok(&kit, &r.spec, r.block);
+            r.adjust_fee(-1);
+            gap_fails(&kit, &r);
+        }
+    }
+    // the tables differ: a renewal is cheaper than a registration in every tier
+    for len in 1..=5 {
+        assert!(p.renew_price_for(len) < p.price_for(len));
+    }
 }
 
 #[test]
@@ -84,8 +108,8 @@ fn rejects_zero_years_and_more_than_max_years() {
             // make the name output and the fee consistent with the claimed years
             let fields = NameFields::new(b"alice", &xonly(&r.owner), 0, NOW_MS, NOW_MS + years * PERIOD);
             r.spec.outputs[2] = kit.name_output(&fields, 0);
-            r.spec.inputs[3].utxo.entry.amount += kit.params.price_for(5) * years as u64; // the funding
-            assert!(r.fee() as u64 >= kit.params.price_for(5) * years as u64);
+            r.spec.inputs[2].utxo.entry.amount += kit.params.register_cost(5, years); // the funding
+            assert!(r.fee() as u64 >= kit.params.register_cost(5, years));
         }
         gap_fails(&kit, &r);
     }
@@ -362,7 +386,7 @@ fn rejects_an_extra_registry_output() {
     // a second copy of the name, also bound to the registry by input 0
     let fields = r.name_fields(PERIOD);
     r.spec.outputs.insert(3, kit.name_output(&fields, 0));
-    r.spec.inputs[3].utxo.entry.amount += kit.params.bond; // the funding
+    r.spec.inputs[2].utxo.entry.amount += kit.params.bond; // the funding
     gap_fails(&kit, &r);
 }
 
@@ -465,12 +489,12 @@ fn rejects_two_registry_inputs() {
 fn rejects_more_than_eight_inputs_or_outputs() {
     let kit = Kit::new();
     // 9 inputs
-    // [gap, commit, price shard, funding] + 5 = 9
+    // [gap, commit, funding] + 6 = 9
     let mut r = register(&kit, b"alice", 1);
-    for t in 0..5u8 {
+    for t in 0..6u8 {
         r.spec.inputs.push(Input::new(kit.p2pk_utxo(&r.owner, kas(1), 100 + t), Unlock::P2pk(r.owner)));
     }
-    r.spec.outputs.last_mut().unwrap().value += kas(5);
+    r.spec.outputs.last_mut().unwrap().value += kas(6);
     assert_eq!(r.spec.inputs.len(), 9);
     gap_fails(&kit, &r);
     // exactly 8 is fine
@@ -480,9 +504,9 @@ fn rejects_more_than_eight_inputs_or_outputs() {
     // 9 outputs
     let mut r = register(&kit, b"alice", 1);
     let ox = xonly(&r.owner);
-    // [gap, gap, name, shard, change] + 4 = 9
-    r.spec.inputs[3].utxo.entry.amount += kas(4);
-    for _ in 0..4 {
+    // [gap, gap, name, change] + 5 = 9
+    r.spec.inputs[2].utxo.entry.amount += kas(5);
+    for _ in 0..5 {
         r.spec.outputs.push(TransactionOutput::new(kas(1), p2pk_spk(&ox)));
     }
     assert_eq!(r.spec.outputs.len(), 9);

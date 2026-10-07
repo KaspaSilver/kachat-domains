@@ -1,6 +1,6 @@
 {
   "network": "mainnet",
-  "registryVersion": 3,
+  "registryVersion": 4,
   "compiler": {
     "repo": "https://github.com/kaspanet/silverscript",
     "tag": "v1.0.0",
@@ -12,44 +12,68 @@
     "tCommit": 600,
     "maxYears": 2,
     "periodMs": 31536000000,
-    "graceMs": 864000000,
-    "renewWindowMs": 864000000,
+    "graceMs": 7776000000,
+    "renewWindowMs": 2592000000,
     "prices": {
-      "len1": 400000000000,
-      "len2": 200000000000,
-      "len3": 100000000000,
-      "len4": 25000000000,
-      "len5plus": 3500000000
+      "register": {
+        "len1": 400000000000,
+        "len2": 200000000000,
+        "len3": 100000000000,
+        "len4": 25000000000,
+        "len5plus": 3500000000
+      },
+      "renew": {
+        "len1": 100000000000,
+        "len2": 50000000000,
+        "len3": 25000000000,
+        "len4": 6250000000,
+        "len5plus": 875000000
+      }
     },
-    "priceShards": 8,
-    "priceValue": 100000000,
     "offerMaxFee": 2000000,
     "genesisGap": {
       "lo": "0000000000000000000000000000000000000000000000000000000000000000",
       "hi": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
     }
   },
-  "priceCovenantId": null,
   "registryCovenantId": null,
   "contracts": {
-    "KachatPrice": {
-      "bytecodeLen": 1691,
+    "KachatName": {
+      "bytecodeLen": 3108,
       "stateSpan": {
         "offset": 1,
-        "len": 87
+        "len": 126
       },
       "prefixLen": 1,
-      "suffixLen": 1603,
-      "templateHash": "d225c3a302b91866a8a7cb09d513b3375715794adf4f1e05eec872b32cb781d3",
+      "suffixLen": 2981,
+      "templateHash": "13bcd781dc95bdba93f89d7f4875bfbdb88e25f84638a8c8c7c1fd08e629e7ed",
       "dispatchTags": {
-        "follow": "e823f7f1",
-        "update": "330d4c0b",
-        "use": "418a030f"
+        "buy": "76a02eb9",
+        "extend": "2ce7cceb",
+        "list": "674a8ea4",
+        "reclaim": "f56af4df",
+        "release": "388ad0b4",
+        "renew": "b706ac38",
+        "transfer": "794dca54"
       },
-      "bytecodeSha256": "afa8dfb72e946fd639066111511e92536e34d59d4caa5b88789f8956920532c6"
+      "bytecodeSha256": "f56ee63526791cc22a3be573d7587d6d85fbf10d4310b7bbe94c8987afc3f396"
     },
-    "KachatName": "not built: set priceCovenantId after the price genesis",
-    "KachatGap": "not built: set priceCovenantId after the price genesis",
-    "KachatOffer": "not built: set priceCovenantId after the price genesis"
+    "KachatGap": {
+      "bytecodeLen": 4067,
+      "stateSpan": {
+        "offset": 1,
+        "len": 66
+      },
+      "prefixLen": 1,
+      "suffixLen": 4000,
+      "templateHash": "6d1da31fda9c2f5fc306b049ee229084fa4eac21598c06e292a141a7dbba84b2",
+      "dispatchTags": {
+        "absorbed": "dab76355",
+        "merge": "63d25bc2",
+        "register": "8667af5e"
+      },
+      "bytecodeSha256": "c8a7a2ee4ad20b99d733e992a6665ce4a26c904e000d7bba8c7bdfa69d82767c"
+    },
+    "KachatOffer": "not built: set registryCovenantId after the registry genesis"
   }
 }

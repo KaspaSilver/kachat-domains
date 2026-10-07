@@ -37,17 +37,12 @@ pub struct Reg {
     pub block: Block,
 }
 
-/// Input index of the price shard in a registration.
-pub const REG_PRICE_IDX: usize = 2;
-/// Input index of the price shard in an extend / renew.
-pub const PAID_PRICE_IDX: usize = 1;
-
 impl Reg {
     pub fn name_fields(&self, period_ms: i64) -> NameFields {
         NameFields::new(&self.name, &xonly(&self.owner), 0, self.now, self.now + self.years * period_ms)
     }
 
-    /// Value left as miner fee by the scenario (price * years + NET_FEE).
+    /// Value left as miner fee by the scenario (the registration cost + NET_FEE).
     pub fn fee(&self) -> i64 {
         self.spec.fee()
     }
@@ -70,8 +65,8 @@ pub fn register_in(kit: &Kit, name: &[u8], years: i64, lo: &[u8; 32], hi: &[u8; 
     let salt = [0x5au8; 32];
     let now = NOW_MS;
     let key = name_key(name);
-    let price = p.price_for(name.len()) * years as u64;
-    let (price_in, price_out) = kit.price_use(3, &p.prices, REG_PRICE_IDX as u16, 13);
+    // registry v4: the first period at the registration price, the rest at the renewal price
+    let price = p.register_cost(name.len(), years.max(1));
 
     let gap_in = Input::contract(
         kit.gap_utxo(lo, hi, 10),
@@ -86,7 +81,6 @@ pub fn register_in(kit: &Kit, name: &[u8], years: i64, lo: &[u8; 32], hi: &[u8; 
             int(years),
             bytes(&kit.name.prefix),
             bytes(&kit.name.suffix),
-            int(REG_PRICE_IDX as i64),
         ],
     );
     let redeem = commit_redeem(&commitment(name, &owner_x, &salt), &owner_x);
@@ -99,12 +93,11 @@ pub fn register_in(kit: &Kit, name: &[u8], years: i64, lo: &[u8; 32], hi: &[u8; 
     let funding = kit.p2pk_utxo(&owner, price + p.bond + p.gap_value + kas(1), 12);
 
     let mut spec = TxSpec {
-        inputs: vec![gap_in, commit_in, price_in, Input::new(funding, Unlock::P2pk(owner))],
+        inputs: vec![gap_in, commit_in, Input::new(funding, Unlock::P2pk(owner))],
         outputs: vec![
             kit.gap_output(lo, &key, 0),
             kit.gap_output(&key, hi, 0),
             kit.name_output(&NameFields::new(name, &owner_x, 0, now, now + years * p.period_ms), 0),
-            price_out,
         ],
         lock_time: now as u64,
     };
@@ -218,19 +211,14 @@ pub fn buy(kit: &Kit, n: &NameCase) -> TxSpec {
 
 /// Anyone (keypair 3) pays `years` for a name with `entry` (extend or renew),
 /// continuation `next`, lock time `lock_time`:
-/// [name @0, price shard 5 @1 (use), funding @2] -> [continuation, shard, change].
+/// [name @0, funding @1] -> [continuation, change].
 fn paid_entry(kit: &Kit, n: &NameCase, entry: &str, years: i64, next: NameFields, lock_time: u64) -> TxSpec {
     let payer = keypair(3);
     let price = kit.params.renew_price_for(name_len(&n.fields.name)) * years.max(0) as u64;
     let funding = kit.p2pk_utxo(&payer, price + kas(2), 23);
-    let (price_in, price_out) = kit.price_use(5, &kit.params.prices, PAID_PRICE_IDX as u16, 24);
     let mut spec = TxSpec {
-        inputs: vec![
-            name_input(kit, n, entry, vec![int(years), int(PAID_PRICE_IDX as i64)]),
-            price_in,
-            Input::new(funding, Unlock::P2pk(payer)),
-        ],
-        outputs: vec![kit.name_output(&next, 0), price_out],
+        inputs: vec![name_input(kit, n, entry, vec![int(years)]), Input::new(funding, Unlock::P2pk(payer))],
+        outputs: vec![kit.name_output(&next, 0)],
         lock_time,
     };
     let change = spec.total_in() - spec.total_out() - price - NET_FEE;
@@ -417,50 +405,6 @@ pub fn refund(kit: &Kit, o: &OfferCase) -> TxSpec {
 
 pub fn refund_block(o: &OfferCase) -> Block {
     Block { daa: o.fields.refund_after as u64 + 1, time_ms: NOW_MS as u64 }
-}
-
-// ---------------------------------------------------------------------------
-// the price record (registry v3)
-// ---------------------------------------------------------------------------
-
-/// A change led by shard 0: every shard is an input in order (shard 0 runs
-/// update(newAuthority, prices, authoritySig), the others follow()), and
-/// output i is shard i's continuation with the new authority and prices,
-/// plus the authority's funding and change.
-pub fn price_update(kit: &Kit, new_authority: &[u8; 32], new_prices: &[u64; 5]) -> TxSpec {
-    let k = kit.params.price_shards;
-    let auth_x = xonly(&kit.authority);
-    let mut inputs: Vec<Input> = (0..k)
-        .map(|i| {
-            let state = price_state(i, &auth_x, &kit.params.prices);
-            let utxo = kit.price_utxo(i, &kit.params.prices, 50 + i as u8);
-            if i == 0 {
-                let mut args = vec![bytes(new_authority)];
-                args.extend(new_prices.iter().map(|p| int(*p as i64)));
-                args.push(Arg::Sig(kit.authority));
-                Input::contract(utxo, &kit.price, state, "update", args)
-            } else {
-                Input::contract(utxo, &kit.price, state, "follow", vec![])
-            }
-        })
-        .collect();
-    let funding = kit.p2pk_utxo(&kit.authority, kas(1), 49);
-    inputs.push(Input::new(funding, Unlock::P2pk(kit.authority)));
-    let mut outputs: Vec<TransactionOutput> = (0..k).map(|i| kit.price_output(i, new_authority, new_prices, i as u16)).collect();
-    outputs.push(TransactionOutput::new(kas(1) - NET_FEE, p2pk_spk(&auth_x)));
-    TxSpec { inputs, outputs, lock_time: 0 }
-}
-
-/// Lone use() of shard 2: [shard @0, funding @1] -> [shard back, change].
-pub fn price_use_alone(kit: &Kit) -> TxSpec {
-    let payer = keypair(3);
-    let (price_in, price_out) = kit.price_use(2, &kit.params.prices, 0, 60);
-    let funding = kit.p2pk_utxo(&payer, kas(1), 61);
-    TxSpec {
-        inputs: vec![price_in, Input::new(funding, Unlock::P2pk(payer))],
-        outputs: vec![price_out, TransactionOutput::new(kas(1) - NET_FEE, p2pk_spk(&xonly(&payer)))],
-        lock_time: 0,
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -17,45 +17,22 @@ fn genesis_mints_the_lone_gap_under_the_registry_id() {
 }
 
 #[test]
-fn price_genesis_mints_every_shard_under_the_price_id() {
-    let kit = Kit::new();
-    let g = &kit.price_genesis_tx;
-    kit.validate(g, Block { daa: 2_000, time_ms: NOW_MS as u64 }).expect("price genesis is valid");
-    let k = kit.params.price_shards as usize;
-    let bound: Vec<_> = g.tx.outputs.iter().filter(|o| o.covenant.is_some()).collect();
-    assert_eq!(bound.len(), k);
-    for (i, out) in g.tx.outputs[..k].iter().enumerate() {
-        assert_eq!(out.covenant.unwrap().covenant_id, kit.price_id);
-        assert_eq!(out.value, kit.params.price_value);
-        assert_eq!(out.script_public_key, kit.price.spk(&price_state(i as i64, &xonly(&kit.authority), &kit.params.prices)));
-    }
-    assert_ne!(kit.price_id, kit.registry_id);
-}
-
-#[test]
 fn testnet_runs_the_short_clock() {
-    // params/testnet10.json: 10-minute periods, renewal and grace of one period each
+    // params/testnet10.json (registry v4): 10-minute periods, a one-period renewal window
+    // (it can't be longer than a period) and 30 minutes of grace
     let p = NetParams::load("testnet10");
-    assert_eq!((p.period_ms, p.renew_window_ms, p.grace_ms, p.max_years), (PERIOD, PERIOD, PERIOD, 2));
+    assert_eq!((p.period_ms, p.renew_window_ms, p.grace_ms, p.max_years), (PERIOD, PERIOD, 3 * PERIOD, 2));
+    // mainnet: a year, a 30-day renewal window, 90 days of grace
     let m = NetParams::load("mainnet");
-    assert_eq!((m.period_ms, m.renew_window_ms, m.grace_ms), (YEAR_MS, 864_000_000, 864_000_000));
+    assert_eq!((m.period_ms, m.renew_window_ms, m.grace_ms), (YEAR_MS, 30 * 86_400_000, 90 * 86_400_000));
+    // the owner's tables (2026-10-07): register 4000 / 2000 / 1000 / 250 / 35 KAS, renew a quarter
+    assert_eq!(m.register_prices, [400_000_000_000, 200_000_000_000, 100_000_000_000, 25_000_000_000, 3_500_000_000]);
+    assert_eq!(m.renew_prices, [100_000_000_000, 50_000_000_000, 25_000_000_000, 6_250_000_000, 875_000_000]);
     // testnet prices are mainnet's / 100
     for i in 0..5 {
-        assert_eq!(p.prices[i] * 100, m.prices[i]);
+        assert_eq!(p.register_prices[i] * 100, m.register_prices[i]);
+        assert_eq!(p.renew_prices[i] * 100, m.renew_prices[i]);
     }
-}
-
-#[test]
-fn nobody_can_mint_the_price_id_later() {
-    let kit = Kit::new();
-    let thief = keypair(9);
-    let spec = TxSpec {
-        inputs: vec![Input::new(kit.p2pk_utxo(&thief, kas(5), 90), Unlock::P2pk(thief))],
-        outputs: vec![kit.price_output(0, &xonly(&thief), &[0; 5], 0)],
-        lock_time: 0,
-    };
-    let err = rejected(&kit, &spec, active_block());
-    assert!(err.contains("genesis") || err.to_lowercase().contains("covenant"), "{err}");
 }
 
 #[test]
@@ -86,34 +63,21 @@ fn a_spent_name_output_cannot_be_rebound_by_a_non_registry_input() {
 
 #[test]
 fn artifacts_match_a_fresh_compile_of_the_sources() {
-    // scripts/build.sh output == the pinned compiler library on contracts/*.sil. Until the
-    // price genesis exists only KachatPrice is built; the kit compiles the name and gap the
-    // way build.py does once priceCovenantId is set (compile_name_in / compile_gap_in).
+    // scripts/build.sh output == the pinned compiler library on contracts/*.sil: the name and
+    // gap are built for every network (registry v4 bakes its prices), the offer once a
+    // registry id exists.
     for net in ["testnet10", "mainnet"] {
         let p = NetParams::load(net);
-        let price = Template::load(net, "KachatPrice");
-        let src = std::fs::read_to_string(repo_root().join("contracts/KachatPrice.sil")).unwrap();
-        let i = |v: i64| ArtifactValue::Int(v);
-        let fresh = compile_source(
-            &src,
-            &[i(0), ArtifactValue::Bytes(ZERO32.to_vec()), i(0), i(0), i(0), i(0), i(0), i(p.price_shards), i(p.price_value as i64)],
-        );
-        assert_eq!(fresh.bytecode, price.bytecode, "{net} KachatPrice");
-        assert_eq!(silverscript_abi::template_hash(&price.prefix, &price.suffix), price.template_hash);
+        let root = repo_root();
+        let name = compile_name_in(&root, &p);
+        assert_eq!(name.bytecode, Template::load(net, "KachatName").bytecode, "{net} KachatName");
+        let gap = compile_gap_in(&root, &p, &name);
+        assert_eq!(gap.bytecode, Template::load(net, "KachatGap").bytecode, "{net} KachatGap");
     }
     let kit = Kit::new();
     for t in [&kit.name, &kit.gap, &kit.offer] {
         assert_eq!(silverscript_abi::template_hash(&t.prefix, &t.suffix), t.template_hash, "{}", t.contract);
     }
-}
-
-#[test]
-fn testnet_and_mainnet_share_the_price_template() {
-    // same shard count and value: the price template is identical; the name and gap differ
-    // only in what they bake (periodMs, windows, the price covenant id)
-    let t = Template::load("testnet10", "KachatPrice");
-    let m = Template::load("mainnet", "KachatPrice");
-    assert_eq!(t.bytecode, m.bytecode);
 }
 
 #[test]
@@ -187,29 +151,12 @@ fn hand_written_state_codecs_match_the_abi() {
     );
     assert_eq!(offer, offer_state(&[4; 32], &[5; 32], &[6; 32], 600_000_000));
     assert_eq!(offer.len(), 108);
-
-    for prices in [[0u64; 5], [4_000_000_000, 2_000_000_000, 1_000_000_000, 250_000_000, 35_000_000], [100_000_000_000_000_000; 5]] {
-        let price = abi_encode(
-            &kit.price,
-            BTreeMap::from([
-                ("shard".into(), i(7)),
-                ("authority".into(), b(&[9; 32])),
-                ("p1".into(), i(prices[0] as i64)),
-                ("p2".into(), i(prices[1] as i64)),
-                ("p3".into(), i(prices[2] as i64)),
-                ("p4".into(), i(prices[3] as i64)),
-                ("p5".into(), i(prices[4] as i64)),
-            ]),
-        );
-        assert_eq!(price, price_state(7, &[9; 32], &prices));
-        assert_eq!(price.len(), PRICE_STATE_LEN);
-    }
 }
 
 #[test]
 fn state_spans_are_where_the_app_splices() {
     let kit = Kit::new();
-    for (t, len) in [(&kit.name, 126), (&kit.gap, 66), (&kit.offer, 108), (&kit.price, 87)] {
+    for (t, len) in [(&kit.name, 126), (&kit.gap, 66), (&kit.offer, 108)] {
         let span = t.abi.contracts[&t.contract].compiled.state_span;
         assert_eq!(span.offset, 1, "{}", t.contract);
         assert_eq!(span.len, len, "{}", t.contract);
@@ -263,32 +210,26 @@ fn dispatch_tags_are_stable() {
         (&kit.offer, "withdraw"),
         (&kit.offer, "refund"),
         (&kit.offer, "decline"),
-        (&kit.price, "use"),
-        (&kit.price, "update"),
-        (&kit.price, "follow"),
     ]
     .iter()
     .map(|(t, e)| (format!("{}.{}", t.contract, e), t.dispatch_tag(e)))
     .collect();
     for (e, tag) in &tags {
         let sig = match e.as_str() {
-            "KachatGap.register" => "register(byte[],byte[32],byte[32],int,int,byte[],byte[],int)",
+            "KachatGap.register" => "register(byte[],byte[32],byte[32],int,int,byte[],byte[])",
             "KachatGap.merge" => "merge()",
             "KachatGap.absorbed" => "absorbed()",
             "KachatName.transfer" => "transfer(byte[32],sig)",
             "KachatName.list" => "list(int,sig)",
             "KachatName.buy" => "buy(byte[32])",
-            "KachatName.extend" => "extend(int,int)",
-            "KachatName.renew" => "renew(int,int)",
+            "KachatName.extend" => "extend(int)",
+            "KachatName.renew" => "renew(int)",
             "KachatName.release" => "release(sig)",
             "KachatName.reclaim" => "reclaim()",
             "KachatOffer.accept" => "accept(int,sig)",
             "KachatOffer.withdraw" => "withdraw(sig)",
             "KachatOffer.refund" => "refund()",
             "KachatOffer.decline" => "decline(sig)",
-            "KachatPrice.use" => "use()",
-            "KachatPrice.update" => "update(byte[32],int,int,int,int,int,sig)",
-            "KachatPrice.follow" => "follow()",
             _ => unreachable!(),
         };
         let expect = faster_hex::hex_string(&blake3::hash(sig.as_bytes()).as_bytes()[..4]);

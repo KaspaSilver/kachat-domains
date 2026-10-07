@@ -1,6 +1,6 @@
 {
   "network": "mainnet",
-  "registryVersion": 3,
+  "registryVersion": 4,
   "compiler": {
     "repo": "https://github.com/kaspanet/silverscript",
     "tag": "v1.0.0",
@@ -11,22 +11,28 @@
   "tCommit": 600,
   "maxYears": 2,
   "periodMs": 31536000000,
-  "graceMs": 864000000,
-  "renewWindowMs": 864000000,
+  "graceMs": 7776000000,
+  "renewWindowMs": 2592000000,
   "prices": {
-    "len1": 400000000000,
-    "len2": 200000000000,
-    "len3": 100000000000,
-    "len4": 25000000000,
-    "len5plus": 3500000000
+    "register": {
+      "len1": 400000000000,
+      "len2": 200000000000,
+      "len3": 100000000000,
+      "len4": 25000000000,
+      "len5plus": 3500000000
+    },
+    "renew": {
+      "len1": 100000000000,
+      "len2": 50000000000,
+      "len3": 25000000000,
+      "len4": 6250000000,
+      "len5plus": 875000000
+    }
   },
-  "priceShards": 8,
-  "priceValue": 100000000,
   "offerMaxFee": 2000000,
   "genesisGap": {
     "lo": "0000000000000000000000000000000000000000000000000000000000000000",
     "hi": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
   },
-  "priceCovenantId": null,
   "registryCovenantId": null
 }

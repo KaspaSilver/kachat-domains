@@ -180,12 +180,12 @@ fn reclaim_after_grace_returns_the_bond_to_the_last_owner() {
 }
 
 #[test]
-fn grace_is_one_period_on_the_testnet_clock() {
-    // ten minutes on testnet (10 days on mainnet, params/mainnet.json)
+fn grace_is_three_periods_on_the_testnet_clock() {
+    // registry v4: 30 minutes on testnet (90 days on mainnet, params/mainnet.json)
     let kit = Kit::new();
-    assert_eq!(kit.params.grace_ms, PERIOD);
+    assert_eq!(kit.params.grace_ms, 3 * PERIOD);
     let e = reclaim(&kit, b"alice");
-    assert_eq!(e.spec.lock_time as i64, e.n.fields.expires_at + 10 * 60_000);
+    assert_eq!(e.spec.lock_time as i64, e.n.fields.expires_at + 30 * 60_000);
 }
 
 #[test]
@@ -277,7 +277,7 @@ fn a_name_cannot_sit_at_seat_2() {
         let args = match entry {
             "release" => vec![Arg::Sig(e.n.owner)],
             "transfer" => vec![bytes(&other.owner), Arg::Sig(e.n.owner)],
-            "extend" | "renew" => vec![int(1), int(0)],
+            "extend" | "renew" => vec![int(1)],
             _ => vec![],
         };
         e.spec.inputs[2] = Input::contract(kit.name_utxo(&other, 34), &kit.name, other.encode(), entry, args);

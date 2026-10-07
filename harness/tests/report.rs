@@ -44,7 +44,7 @@ fn set_change(spec: &mut TxSpec, idx: usize, fee: u64) {
 fn print_costs() {
     let kit = Kit::new();
     println!("\n## Template sizes (bytes)\n");
-    for t in [&kit.price, &kit.gap, &kit.name, &kit.offer] {
+    for t in [&kit.gap, &kit.name, &kit.offer] {
         println!(
             "- {}: {} (prefix {}, state {}, suffix {}), template hash {}",
             t.contract,
@@ -59,46 +59,46 @@ fn print_costs() {
     println!("| operation | size B | compute g | transient g (norm.) | storage g | min fee KAS | compute budget per contract input (script units used) |");
     println!("|---|---|---|---|---|---|---|");
     let r = register(&kit, b"alice", 1);
-    println!("{}", row(&kit, "register 5-char, 1 period", &r.spec, r.block, &["gap.register", "commit", "price.use", ""]));
+    println!("{}", row(&kit, "register 5-char, 1 period", &r.spec, r.block, &["gap.register", "commit", ""]));
     let r = register(&kit, b"kaspa-silver-0123456789-abcdefgh", kit.params.max_years);
-    println!("{}", row(&kit, "register 32-char, max periods", &r.spec, r.block, &["gap.register", "commit", "price.use", ""]));
+    println!("{}", row(&kit, "register 32-char, max periods", &r.spec, r.block, &["gap.register", "commit", ""]));
     // worst cases: longest name, most periods, 8 inputs and 8 outputs
     let mut r = register(&kit, b"kaspa-silver-0123456789-abcdefgh", kit.params.max_years);
     let ox = xonly(&r.owner);
-    for t in 0..4u8 {
+    for t in 0..5u8 {
         r.spec.inputs.push(Input::new(kit.p2pk_utxo(&r.owner, kas(1), 120 + t), Unlock::P2pk(r.owner)));
     }
-    for _ in 0..3 {
+    for _ in 0..4 {
         r.spec.outputs.push(TransactionOutput::new(kas(1), p2pk_spk(&ox)));
     }
-    set_change(&mut r.spec, 4, kit.params.price_for(32) * kit.params.max_years as u64 + NET_FEE);
+    set_change(&mut r.spec, 3, kit.params.register_cost(32, kit.params.max_years) + NET_FEE);
     assert_eq!((r.spec.inputs.len(), r.spec.outputs.len()), (8, 8));
-    println!("{}", row(&kit, "register worst case (32 chars, max periods, 8 in, 8 out)", &r.spec, r.block, &["gap.register", "commit", "price.use", "", "", "", "", ""]));
+    println!("{}", row(&kit, "register worst case (32 chars, max periods, 8 in, 8 out)", &r.spec, r.block, &["gap.register", "commit", "", "", "", "", "", ""]));
     let n = name_case(&kit, b"alice", 0);
     let payer = keypair(3);
     let widen = |mut s8: TxSpec, years: i64| {
-        for t in 0..5u8 {
+        for t in 0..6u8 {
             s8.inputs.push(Input::new(kit.p2pk_utxo(&payer, kas(1), 130 + t), Unlock::P2pk(payer)));
         }
-        for _ in 0..5 {
+        for _ in 0..6 {
             s8.outputs.push(TransactionOutput::new(kas(1), p2pk_spk(&xonly(&payer))));
         }
-        set_change(&mut s8, 2, kit.params.renew_price_for(5) * years as u64 + NET_FEE);
+        set_change(&mut s8, 1, kit.params.renew_price_for(5) * years as u64 + NET_FEE);
         assert_eq!((s8.inputs.len(), s8.outputs.len()), (8, 8));
         s8
     };
     let s8 = widen(renew(&kit, &n, kit.params.max_years), kit.params.max_years);
-    println!("{}", row(&kit, "renew worst case (max periods, 8 in, 8 out)", &s8, window_block(&kit, &n), &["name.renew", "price.use", "", "", "", "", "", ""]));
+    println!("{}", row(&kit, "renew worst case (max periods, 8 in, 8 out)", &s8, window_block(&kit, &n), &["name.renew", "", "", "", "", "", "", ""]));
     // extend: at most maxYears past periodStart, so 1 period from a 1-period registration
     let s8 = widen(extend(&kit, &n, 1), 1);
-    println!("{}", row(&kit, "extend worst case (1 period, 8 in, 8 out)", &s8, active_block(), &["name.extend", "price.use", "", "", "", "", "", ""]));
+    println!("{}", row(&kit, "extend worst case (1 period, 8 in, 8 out)", &s8, active_block(), &["name.extend", "", "", "", "", "", "", ""]));
     println!("{}", row(&kit, "transfer", &transfer(&kit, &n, &xonly(&keypair(7))), active_block(), &["name.transfer", ""]));
     println!("{}", row(&kit, "list", &list(&kit, &n, 10 * SOMPI_PER_KAS as i64), active_block(), &["name.list", ""]));
     let listed = name_case(&kit, b"alice", 10 * SOMPI_PER_KAS as i64);
     println!("{}", row(&kit, "buy", &buy(&kit, &listed), active_block(), &["name.buy", ""]));
-    println!("{}", row(&kit, "extend 1 period", &extend(&kit, &n, 1), active_block(), &["name.extend", "price.use", ""]));
-    println!("{}", row(&kit, "renew 1 period (in the window)", &renew(&kit, &n, 1), window_block(&kit, &n), &["name.renew", "price.use", ""]));
-    println!("{}", row(&kit, "renew 2 periods (in the window)", &renew(&kit, &n, 2), window_block(&kit, &n), &["name.renew", "price.use", ""]));
+    println!("{}", row(&kit, "extend 1 period", &extend(&kit, &n, 1), active_block(), &["name.extend", ""]));
+    println!("{}", row(&kit, "renew 1 period (in the window)", &renew(&kit, &n, 1), window_block(&kit, &n), &["name.renew", ""]));
+    println!("{}", row(&kit, "renew 2 periods (in the window)", &renew(&kit, &n, 2), window_block(&kit, &n), &["name.renew", ""]));
     let e = release(&kit, b"alice");
     println!("{}", row(&kit, "release (exit)", &e.spec, e.block, &["gap.merge", "name.release", "gap.absorbed"]));
     let e = reclaim(&kit, b"alice");
@@ -113,11 +113,4 @@ fn print_costs() {
         let built = kit.build(&spec);
         assert!(kit.costs(&built).min_fee <= kit.params.offer_max_fee);
     }
-    let k = kit.params.price_shards as usize;
-    let mut roles = vec!["price.update"];
-    roles.extend(std::iter::repeat_n("price.follow", k - 1));
-    roles.push("");
-    let up = price_update(&kit, &xonly(&kit.authority), &kit.params.prices.map(|p| p * 2));
-    println!("{}", row(&kit, &format!("price change ({k} shards)"), &up, active_block(), &roles));
-    println!("{}", row(&kit, "price shard use, alone", &price_use_alone(&kit), active_block(), &["price.use", ""]));
 }
