@@ -18,3 +18,4 @@ pub mod registry;
 pub mod scan;
 pub mod summary;
 pub mod util;
+pub mod verify;

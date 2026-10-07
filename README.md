@@ -171,6 +171,19 @@ signed entry. Recommended fixed budgets for the app (v2; v1 in brackets): regist
 19,999: 2 leaves room), extend 2 (new), renew 2 [1], release 10, reclaim 0, accept 5 [3], withdraw
 10, refund 0, commit/P2PK 10.
 
+## Run it (Docker, Kaspa Quick Start)
+
+```bash
+docker build -t kachat-domains https://github.com/KaspaSilver/kachat-domains.git#main
+docker run --rm kachat-domains verify          # the deployed manifest, checked against contracts/ + params/
+docker run --rm -v "$PWD/names:/names" kachat-domains publish   # verify, then copy the manifest out
+docker run --rm kachat-domains prices
+```
+
+`verify` (also `kachat-names verify` from a checkout) recompiles the contracts in-process and
+requires the committed artifacts and the manifest - templates, genesis binding, params - to match.
+Kaspa Quick Start installs and updates this as an app: [docs/KQS.md](docs/KQS.md).
+
 ## Build and test
 
 ```bash

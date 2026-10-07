@@ -66,6 +66,14 @@ enum Cmd {
     },
     /// Show the two price tables baked into the gap and the name (read-only, no node needed)
     Prices,
+    /// Check the deployed manifest against the sources: compiles the contracts from
+    /// contracts/ + params/, requires the committed artifacts and the manifest to match
+    /// (offline, no node or key; exit 1 on any mismatch)
+    Verify {
+        /// print the summary as JSON (for Kaspa Quick Start)
+        #[arg(long)]
+        json: bool,
+    },
     /// Salted commit for a name (salt kept in .secrets/commits.json)
     Commit { name: String },
     /// Register a committed name
@@ -177,6 +185,21 @@ async fn run(cli: Cli, paths: Paths) -> Result<()> {
         Cmd::Prices => {
             ensure!(!cli.submit, "prices sends nothing");
             prices(&paths)
+        }
+        Cmd::Verify { json } => {
+            ensure!(!cli.submit, "verify sends nothing");
+            let v = kachat_names_cli::verify::verify(&paths)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                println!("OK  {} registry v{} {}", v["network"].as_str().unwrap_or(""), v["registryVersion"], v["registryCovenantId"].as_str().unwrap_or(""));
+                println!("    genesis {}  manifest sha256 {}", v["genesisTxid"].as_str().unwrap_or(""), v["manifestSha256"].as_str().unwrap_or(""));
+                for (c, h) in v["templateHashes"].as_object().into_iter().flatten() {
+                    println!("    {c:<11} {}", h.as_str().unwrap_or(""));
+                }
+                println!("    compiled from contracts/ + params/: identical to the committed artifacts and the manifest");
+            }
+            Ok(())
         }
         Cmd::E2ePlan { simulate } => e2e_plan(&paths, *simulate),
         _ => live(cli, paths).await,

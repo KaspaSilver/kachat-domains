@@ -1,0 +1,6 @@
+# Build context: sources and data only (target/ alone is several GB)
+**/target
+.git
+.secrets
+state
+manifests/dryrun
