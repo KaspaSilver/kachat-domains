@@ -512,11 +512,13 @@ async fn command(l: &Live, cmd: &Cmd) -> Result<()> {
                 println!("warning: {w}");
             }
             println!(
-                "scanned {} chain blocks, {} accepted transactions, {} registry events; checkpoint {}",
+                "scanned {} chain blocks in {} page(s), {} accepted transactions, {} registry events; checkpoint {}{}",
                 rep.blocks,
+                rep.pages,
                 rep.txs,
                 rep.events.len(),
-                reg.scan_from.map(|h| h.to_string()).unwrap_or_default()
+                reg.scan_from.map(|h| h.to_string()).unwrap_or_default(),
+                if rep.reached_tip { "" } else { " (not at the tip yet)" }
             );
             Ok(())
         }
@@ -792,6 +794,9 @@ async fn status(l: &Live, do_scan: bool) -> Result<()> {
     if do_scan {
         let rep = scan::scan(&l.node, &kit, &mut reg, 20, 10_000, l.verbose).await?;
         reg.save(&l.paths.state())?;
+        for w in &rep.warnings {
+            println!("warning: {w}");
+        }
         println!("scan: {} chain blocks, {} registry events", rep.blocks, rep.events.len());
     }
     reg.check_invariants()?;
