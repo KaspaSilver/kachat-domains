@@ -73,6 +73,14 @@ enum Cmd {
         /// print the summary as JSON (for Kaspa Quick Start)
         #[arg(long)]
         json: bool,
+        /// also prove a list of names is exactly the registry on chain: derive every gap
+        /// and name address from it and require each to hold a registry UTXO (needs a node
+        /// with --utxoindex; see --node)
+        #[arg(long)]
+        live: bool,
+        /// with --live: prove this indexer's `/names/all` (default: this CLI's own scan, state/)
+        #[arg(long)]
+        indexer: Option<String>,
     },
     /// Salted commit for a name (salt kept in .secrets/commits.json)
     Commit { name: String },
@@ -186,9 +194,13 @@ async fn run(cli: Cli, paths: Paths) -> Result<()> {
             ensure!(!cli.submit, "prices sends nothing");
             prices(&paths)
         }
-        Cmd::Verify { json } => {
+        Cmd::Verify { json, live, indexer } => {
             ensure!(!cli.submit, "verify sends nothing");
-            let v = kachat_names_cli::verify::verify(&paths)?;
+            ensure!(*live || indexer.is_none(), "--indexer needs --live");
+            let mut v = kachat_names_cli::verify::verify(&paths)?;
+            if *live {
+                v["live"] = verify_live(&cli, &paths, indexer.as_deref()).await?;
+            }
             if *json {
                 println!("{}", serde_json::to_string_pretty(&v)?);
             } else {
@@ -198,12 +210,78 @@ async fn run(cli: Cli, paths: Paths) -> Result<()> {
                     println!("    {c:<11} {}", h.as_str().unwrap_or(""));
                 }
                 println!("    compiled from contracts/ + params/: identical to the committed artifacts and the manifest");
+                if let Some(l) = v.get("live") {
+                    println!(
+                        "OK  live: {} names from {} are exactly the registry - all {} gaps and {} names hold registry UTXOs at {}",
+                        l["names"], l["source"].as_str().unwrap_or(""), l["gaps"], l["names"], l["node"].as_str().unwrap_or("")
+                    );
+                }
             }
             Ok(())
         }
         Cmd::E2ePlan { simulate } => e2e_plan(&paths, *simulate),
         _ => live(cli, paths).await,
     }
+}
+
+/// `verify --live`: the claimed names (an indexer's `/names/all`, or this CLI's scan) are
+/// exactly the registry on chain (src/prove.rs).
+async fn verify_live(cli: &Cli, paths: &Paths, indexer: Option<&str>) -> Result<serde_json::Value> {
+    use kachat_names_cli::prove::{self, Claim};
+    let d = manifest::load(&paths.manifest(), None)?;
+    let kit = Templates::load(&paths.root).kit(d.registry_id)?;
+    let (source, claims) = match indexer {
+        Some(base) => {
+            let base = base.trim_end_matches('/').to_string();
+            let id = d.registry_id.to_string();
+            let claims = tokio::task::spawn_blocking(move || -> Result<Vec<Claim>> {
+                let get = |path: &str| -> Result<serde_json::Value> {
+                    ureq::get(&format!("{base}{path}"))
+                        .timeout(std::time::Duration::from_secs(30))
+                        .call()
+                        .map_err(|e| anyhow!("{base}{path}: {e}"))?
+                        .into_json()
+                        .map_err(|e| anyhow!("{base}{path}: {e}"))
+                };
+                let status = get("/names/status")?;
+                ensure!(
+                    status["registryCovenantId"].as_str() == Some(id.as_str()),
+                    "the indexer follows registry {}, not {id}",
+                    status["registryCovenantId"]
+                );
+                let mut claims = vec![];
+                let mut cursor: Option<String> = None;
+                loop {
+                    let page = get(&format!("/names/all{}", cursor.as_ref().map(|c| format!("?cursor={c}")).unwrap_or_default()))?;
+                    for n in page["names"].as_array().ok_or_else(|| anyhow!("/names/all: no `names` array"))? {
+                        claims.push(Claim::from_indexer(n)?);
+                    }
+                    match page["next"].as_str() {
+                        Some(c) => cursor = Some(c.to_string()),
+                        None => break,
+                    }
+                }
+                Ok(claims)
+            })
+            .await??;
+            (indexer.unwrap().to_string(), claims)
+        }
+        None => {
+            let reg = Registry::load(&paths.state())?
+                .ok_or_else(|| anyhow!("{} not found: run `scan` first, or pass --indexer", paths.rel(&paths.state())))?;
+            ensure!(reg.registry_id == d.registry_id, "state/ is for registry {}, not {}", reg.registry_id, d.registry_id);
+            let claims = reg.names.iter().map(|n| Claim { name: n.name(), fields: n.fields.clone() }).collect();
+            (paths.rel(&paths.state()), claims)
+        }
+    };
+    let p = prove::probe(&claims, &kit)?;
+    let node = Node::connect(cli.node.as_deref(), cli.verbose).await?;
+    node.check_network().await?;
+    let held = node.utxos(&p.addresses()).await?;
+    let url = node.url.clone();
+    node.disconnect().await;
+    let r = prove::check(&p, held.into_iter().map(|(a, _, e)| (a, e.covenant_id, e.amount)), &kit, d.registry_id)?;
+    Ok(serde_json::json!({ "ok": true, "source": source, "names": r.names, "gaps": r.gaps, "node": url }))
 }
 
 // ---------------------------------------------------------------------------

@@ -40,6 +40,7 @@ docker build -t kaspa-one-click/kachat-domains:main \
 |---|---|---|
 | `publish` (mount a dir at `/names`) | Runs `verify`. If it passes, it copies `manifests/kachat-names-testnet-10.json` into `/names/` and writes `/names/kachat-domains.json` (the verify summary). Writes are atomic (temp file + rename). | Only on success; exit 1 and nothing written otherwise |
 | `verify` (`--json` for machines) | Recompiles the name, gap and offer from `contracts/*.sil` + `params/testnet10.json` with the pinned silverscript library. It then requires the committed artifacts, the manifest's templates, its genesis binding (registry id = covenant id of the genesis outpoint and gap) and every manifest param to match. Offline: no node, no key. | Nothing |
+| `verify --live --indexer <url> --node grpc://<host>:16210` | Also **proves the indexer's name list is exactly the registry on chain**. It reads `/names/all`, works out every gap and name address from it, and requires each to hold a registry UTXO of the right value (section 2.1). Needs a node with `--utxoindex`. | Nothing |
 | `version` | The commit the image was built from | Nothing |
 | anything else | Passed to `kachat-names`, e.g. `prices`, `status --node grpc://kaspad-testnet:16210` | See the CLI |
 
@@ -61,7 +62,30 @@ docker build -t kaspa-one-click/kachat-domains:main \
 }
 ```
 
-`verify` fails on all of the following, each tested:
+### 2.1 `verify --live`: the indexer, proven against the chain
+
+The approach is taken from supertypo/dotk-covenants' verifier. The registry's live gaps and names
+partition the key space, and all of them carry the registry covenant id. So from the indexer's
+full list of names:
+- every gap between the sorted keys must exist on chain, which proves no name is hidden or
+  invented;
+- every name must exist with exactly the listed owner, price and dates.
+
+Without `--indexer` it proves this CLI's own scan (`state/`) instead.
+
+With `--json`, the summary gains
+`"live": {"ok": true, "source": <url>, "names": N, "gaps": N+1, "node": <url>}`.
+
+KQS can run it on a schedule against its own indexer and node:
+`docker run --rm kaspa-one-click/kachat-domains:<ref> verify --live --json --indexer http://kachat-app-testnet:3080 --node grpc://kaspad-testnet:16210`.
+Show the result as "Indexer proven against chain" on the status card.
+
+- **A transient failure is possible right after a block** that registers or exits a name, if the
+  list and the node answer are taken at different moments. Retry once before alerting.
+- **It needs the indexer's `GET /names/all`** (kachat-indexer `docs/KACHAT_NAMES_ALL.md`). Until
+  that endpoint exists, `--indexer` fails with a 404.
+
+`verify` fails on all of the following, each tested in `tools/kachat-names-cli/tests/verify.rs`:
 - a manifest param that differs from params;
 - params that don't compile to the committed artifacts;
 - a manifest whose templates or registry id don't match.

@@ -14,6 +14,7 @@ pub mod node;
 pub mod ops;
 pub mod paths;
 pub mod plan;
+pub mod prove;
 pub mod registry;
 pub mod scan;
 pub mod summary;

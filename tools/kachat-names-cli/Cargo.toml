@@ -34,3 +34,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# `verify --live --indexer`: read the indexer's name list (blocking, rustls)
+ureq = { version = "2.12", features = ["json"] }

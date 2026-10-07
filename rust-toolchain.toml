@@ -1,0 +1,6 @@
+# The Rust toolchain every build of this repo uses (harness, CLI, the Docker image), so a
+# verification someone re-runs builds the same code we did. rustup reads this file; the
+# Dockerfile's RUST_VERSION must match it.
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"

@@ -182,6 +182,9 @@ docker run --rm kachat-domains prices
 
 `verify` (also `kachat-names verify` from a checkout) recompiles the contracts in-process and
 requires the committed artifacts and the manifest - templates, genesis binding, params - to match.
+`verify --live [--indexer <url>] --node <grpc>` also proves a list of names is exactly the
+registry on chain: every gap between the names, and every name with its owner and dates, must hold
+a registry UTXO. The source is an indexer's `/names/all`, or this CLI's own scan.
 Kaspa Quick Start installs and updates this as an app: [docs/KQS.md](docs/KQS.md).
 
 ## Build and test

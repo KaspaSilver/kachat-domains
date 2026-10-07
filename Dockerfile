@@ -13,7 +13,8 @@
 # into the CLI), so the published manifest is checked against contracts/ and
 # params/ every time.
 
-ARG RUST_VERSION=1.97
+# must match rust-toolchain.toml
+ARG RUST_VERSION=1.97.1
 
 FROM rust:${RUST_VERSION}-bookworm AS build
 # rocksdb (bindgen -> libclang, cmake), gRPC (tonic/prost -> protoc)
@@ -21,6 +22,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends clang libclang-dev cmake protobuf-compiler pkg-config \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
+COPY rust-toolchain.toml ./
 COPY harness/Cargo.toml harness/Cargo.lock harness/
 COPY harness/src harness/src
 COPY tools/kachat-names-cli/Cargo.toml tools/kachat-names-cli/Cargo.lock tools/kachat-names-cli/
