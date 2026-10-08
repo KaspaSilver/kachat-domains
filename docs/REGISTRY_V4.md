@@ -171,12 +171,29 @@ A name entry on `KachatName`, allowed once `tx.time >= expiresAt + grace`:
 
 ## 8. Order of work
 
+Status as of 2026-10-08:
+
 1. ~~Owner decisions (section 7).~~ Done 2026-10-07.
-2. Contracts (`KachatPrice` out, two tables, new windows), harness scenarios and mutation pairs.
-3. Prototype the Merkle proof in silverc and the harness (proves section 3 for the next version;
-   not shipped in v4).
-4. CLI: genesis, snapshot, test vectors.
-5. Testnet dry run, then "send it".
-6. iOS, then the indexer handoff, then Android, Desktop and the extension.
-7. An external audit of every entry.
-8. Mainnet.
+2. ~~Contracts (`KachatPrice` out, two tables, new windows), harness scenarios and mutation
+   pairs.~~ Done. The guard against silverscript#258 (`tests/ctor_commitment.rs`) was added
+   2026-10-07.
+3. **Open:** prototype the Merkle proof in silverc and the harness. This proves section 3 for
+   the next version; it isn't shipped in v4. Still to answer: does a 20-level proof fit the script
+   size and operation limits?
+4. CLI:
+   - ~~genesis, test vectors~~ done;
+   - ~~`verify` and `verify --live`, the Docker image~~ done 2026-10-07;
+   - **open:** `snapshot` (the reproducible Merkle root of section 3), together with step 3.
+5. ~~Testnet dry run, then "send it".~~ Done twice: the 10-minute clock (registry
+   `bff18554…0e2f`, 2026-10-07, archived in `manifests/v4-10min/`), then the day clock (registry
+   `e6b72448…7f0d`, 2026-10-07, live).
+6. Clients:
+   - ~~iOS~~ done;
+   - ~~the indexer~~ done (follows the day-clock registry; names in grace keep labelling their
+     owner);
+   - **open:** the indexer's `GET /names/all` (kachat-indexer `docs/KACHAT_NAMES_ALL.md`), so
+     `verify --live --indexer` can prove an indexer;
+   - Android, Desktop and the extension: by their own sessions.
+7. **Open:** an external audit of every entry.
+8. **Open:** mainnet. It needs the owner's explicit go-ahead after the audit, then a mainnet dry
+   run and "send it".
