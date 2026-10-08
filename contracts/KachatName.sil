@@ -17,8 +17,8 @@ pragma silverscript ^0.1.0;
 //                          lock-time domain)
 //
 // Baked parameters: bond (exact value of every name UTXO), maxYears,
-// graceMs, renewWindowMs, periodMs (one paid period: a year on mainnet, 10
-// minutes on the testnet short clock), and renew1 .. renew5: the price per
+// graceMs, renewWindowMs, periodMs (one paid period: a year on mainnet, 24
+// hours on the testnet-10 day clock), and renew1 .. renew5: the price per
 // period for extend and renew, by name length (registry v4: fixed, no price
 // record and no authority key; KachatGap charges the same table for every
 // period after the first).
@@ -31,9 +31,10 @@ pragma silverscript ^0.1.0;
 //           renewWindowMs, also in grace and after lapse): a new period
 //           starts at the old expiry.
 // Script can only say "not before", so transfer, list, buy, extend and renew
-// keep working after expiresAt; the indexer and the app stop resolving a
-// name at expiresAt. From expiresAt + graceMs anyone may run the exit
-// (reclaim) and the bond goes back to the last owner.
+// keep working after expiresAt. The indexer and the app keep resolving a
+// name to its owner through the grace period and stop once it lapses at
+// expiresAt + graceMs; from then on anyone may run the exit (reclaim) and the
+// bond goes back to the last owner.
 //
 // Every owner signature must use SIGHASH_ALL (0x01), so it commits to every
 // output of the transaction (the continuation, the payout, the change).

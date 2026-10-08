@@ -14,8 +14,8 @@ pragma silverscript ^0.1.0;
 //   gapValue  exact value of every gap UTXO
 //   tCommit   minimum age, in DAA score, of the commit UTXO at registration
 //   maxYears  most periods a registration may prepay
-//   periodMs  length of one paid period (a year on mainnet, 10 minutes on the
-//             testnet short clock)
+//   periodMs  length of one paid period (a year on mainnet, 24 hours on the
+//             testnet-10 day clock)
 //   reg1 .. reg5      registration price, sompi, for the first period of a
 //                     name of 1, 2, 3, 4 and 5+ bytes (registry v4: fixed,
 //                     no price record and no authority key)
