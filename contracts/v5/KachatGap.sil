@@ -275,20 +275,20 @@ contract KachatGap(
     // name its owner later releases cannot be pushed back onto them by others.
     // Listings do not carry over (price 0).
     entry import(byte[] name, byte[32] owner, int periodStart, int expiresAt, int index, byte[] proof, bool bySponsor, sig authSig, byte[] namePrefix, byte[] nameSuffix) {
-        require(this.activeInputIndex == 0, "gap at input 0");
+        require(this.activeInputIndex == 0, "import: gap at input 0");
         byte[32] covId = OpInputCovenantId(0);
-        require(OpCovInputCount(covId) == 1, "one registry input");
-        require(OpCovOutputCount(covId) == 3, "three registry outputs");
-        require(OpCovOutputIdx(covId, 0) == 0, "registry output 0");
-        require(OpCovOutputIdx(covId, 1) == 1, "registry output 1");
-        require(OpCovOutputIdx(covId, 2) == 2, "registry output 2");
-        require(OpAuthOutputCount(0) == 3, "gap authorizes outputs 0..2");
+        require(OpCovInputCount(covId) == 1, "import: one registry input");
+        require(OpCovOutputCount(covId) == 3, "import: three registry outputs");
+        require(OpCovOutputIdx(covId, 0) == 0, "import: registry output 0");
+        require(OpCovOutputIdx(covId, 1) == 1, "import: registry output 1");
+        require(OpCovOutputIdx(covId, 2) == 2, "import: registry output 2");
+        require(OpAuthOutputCount(0) == 3, "import: gap authorizes outputs 0..2");
 
         validName(name);
         int len = name.length;
         byte[32] newKey = blake3(name);
-        require(lessThan(lo, newKey), "lo < key");
-        require(lessThan(newKey, hi), "key < hi");
+        require(lessThan(lo, newKey), "import: lo < key");
+        require(lessThan(newKey, hi), "import: key < hi");
         byte[32] zeros = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
         require(owner != zeros, "owner key");
         require(periodStart >= 0, "periodStart range");
@@ -323,11 +323,11 @@ contract KachatGap(
         require(h == snapshotRoot, "in the snapshot");
 
         // Outputs: as register, with the snapshot's owner and paid period.
-        require(tx.outputs[0].value == gapValue, "lower gap value");
+        require(tx.outputs[0].value == gapValue, "import: lower gap value");
         validateOutputState(0, State { lo: lo, hi: newKey });
-        require(tx.outputs[1].value == gapValue, "upper gap value");
+        require(tx.outputs[1].value == gapValue, "import: upper gap value");
         validateOutputState(1, State { lo: newKey, hi: hi });
-        require(tx.outputs[2].value == bond, "name bond");
+        require(tx.outputs[2].value == bond, "import: name bond");
         byte[32] padded = byte[32](name + zeros.slice(0, 32 - len));
         validateOutputStateWithTemplate(
             2,

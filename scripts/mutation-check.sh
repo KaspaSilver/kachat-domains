@@ -3,7 +3,7 @@
 # artifacts, run the engine-backed suite, and report which tests catch it.
 # A mutation nobody catches is either redundant (defense in depth, labelled
 # "redundant" below, with what covers it) or a hole in the tests. Restores contracts/ and artifacts/ after
-# each mutation. Usage: scripts/mutation-check.sh
+# each mutation. Usage: scripts/mutation-check.sh [label prefix, e.g. v5]
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -11,7 +11,10 @@ if [[ -n "$(git status --porcelain contracts artifacts)" ]]; then
   echo "contracts/ or artifacts/ have uncommitted changes; commit first" >&2; exit 1
 fi
 
+ONLY="${1:-}"
+
 mutate() { # file old new label
+  [[ -n "$ONLY" && "$4" != "$ONLY"* ]] && return
   python3 - "$1" "$2" "$3" <<'PY'
 import sys
 f, old, new = sys.argv[1:4]
@@ -124,3 +127,30 @@ mutate $O 'require(tx.inputs.length == 1, "decline alone");' '' "offer: decline 
 mutate $O 'require(tx.outputs.length == 1, "one return output");' '' "offer: decline one output"
 mutate $O 'require(tx.outputs[0].scriptPubKey == byte[](buyerLock), "back to the buyer");' '' "offer: decline to the buyer"
 mutate $O 'require(tx.outputs[0].value >= tx.inputs[0].value - maxFee, "return covers the offer");' '' "offer: decline value"
+
+# registry v5 (contracts/v5/KachatGap.sil): import from a migration snapshot,
+# register closed until the snapshot deadline. The harness compiles this gap
+# in-process (tests/import.rs), so no artifact depends on it.
+G5=contracts/v5/KachatGap.sil
+mutate $G5 'require(now >= snapshotDeadline, "registration opens at the snapshot deadline");' '' "v5 register: closed until the deadline"
+mutate $G5 'require(checkSig(authSig, pubkey(signer)), "import signature");' '' "v5 import: signature"
+mutate $G5 'require(rawSig[64] == 0x01, "SIGHASH_ALL");' '' "v5 import: SIGHASH_ALL only"
+mutate $G5 'signer = snapshotSponsor;' '' "v5 import: the sponsor flag switches the signer"
+mutate $G5 'require(snapshotSponsor != zeros, "no sponsor");' '' "v5 import: no sponsor (redundant: checkSig on the zero key fails as an invalid pubkey)"
+mutate $G5 'require(h == snapshotRoot, "in the snapshot");' '' "v5 import: in the snapshot"
+mutate $G5 'require(path == 0, "leaf index < 2^SNAPSHOT_DEPTH");' '' "v5 import: index below 2^20"
+mutate $G5 'require(index >= 0, "leaf index");' '' "v5 import: index not negative"
+mutate $G5 'require(proof.length == SNAPSHOT_PROOF_LEN, "proof length");' '' "v5 import: proof length"
+mutate $G5 'if (path % 2 == 0) {' 'if (path % 2 == 1) {' "v5 import: path direction"
+mutate $G5 'require(owner != zeros, "owner key");' '' "v5 import: zero owner (redundant: no leaf has a zero owner, and the owner path fails its signature check)"
+mutate $G5 'require(periodStart >= 0, "periodStart range");' '' "v5 import: periodStart not negative"
+mutate $G5 'require(periodStart <= expiresAt, "periodStart <= expiresAt");' '' "v5 import: periodStart <= expiresAt"
+mutate $G5 'require(expiresAt <= MAX_EXPIRES_AT, "expiresAt range");' '' "v5 import: expiresAt cap"
+mutate $G5 'require(lessThan(lo, newKey), "import: lo < key");' '' "v5 import: lo < key"
+mutate $G5 'require(lessThan(newKey, hi), "import: key < hi");' '' "v5 import: key < hi"
+mutate $G5 'require(tx.outputs[2].value == bond, "import: name bond");' '' "v5 import: name bond"
+mutate $G5 'require(tx.outputs[0].value == gapValue, "import: lower gap value");' '' "v5 import: lower gap value"
+mutate $G5 'require(tx.outputs[1].value == gapValue, "import: upper gap value");' '' "v5 import: upper gap value"
+mutate $G5 'NameState { key: newKey, name: padded, owner: owner, price: 0, periodStart: periodStart, expiresAt: expiresAt }' 'NameState { key: newKey, name: padded, owner: owner, price: 0, periodStart: periodStart, expiresAt: expiresAt + 1 }' "v5 import: the name keeps the snapshot expiry"
+mutate $G5 'require(OpCovOutputCount(covId) == 3, "import: three registry outputs");' '' "v5 import: output count (redundant with AuthOutputCount(0) == 3 + one registry input, as register)"
+mutate $G5 'require(this.activeInputIndex == 0, "import: gap at input 0");' '' "v5 import: gap at input 0"
