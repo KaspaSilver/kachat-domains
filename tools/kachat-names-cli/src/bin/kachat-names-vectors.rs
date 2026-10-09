@@ -32,8 +32,13 @@
 //!
 //! Nothing here touches the network.
 //!
-//!     cargo run --release --bin kachat-names-vectors -- <out.json>
-//!     cargo run --release --bin kachat-names-vectors -- check <port-built.json>
+//!     cargo run --release --bin kachat-names-vectors -- [--network mainnet] <out.json>
+//!     cargo run --release --bin kachat-names-vectors -- [--network mainnet] check <port-built.json>
+//!
+//! `--network mainnet` builds them on params/mainnet.json and artifacts/mainnet (the
+//! deployed registry's name and gap templates; the offer is compiled for the vectors'
+//! own synthetic registry id, as on testnet), with `kaspa:` addresses and mainnet
+//! consensus params.
 
 use std::path::PathBuf;
 
@@ -41,7 +46,7 @@ use anyhow::{Result, anyhow, bail, ensure};
 use kachat_names_cli::{
     commits::{CommitRec, find_open},
     manifest,
-    net::{p2pk_address, spk_address},
+    net::{self, net, p2pk_address, spk_address},
     ops::{self, Env, ExitParts, Plan, Templates},
     paths::Paths,
     plan::{Sim, Step, e2e_steps},
@@ -66,15 +71,18 @@ use serde_json::{Value, json};
 
 /// The compute budgets an app without a script engine commits per entry
 /// (README "Cost per operation"): every budget the CLI measures must fit.
-/// Registry v4: no price input (the tables are baked), so register, merge, extend and
-/// renew are back to their v2 budgets (measured: register at most 85,837 script units,
-/// merge 46,918, extend / renew ~19,940, which budget 1's 19,999 covers by under 60
-/// units: 2 leaves room); offers check the seller's signature.
+/// Registry v4: no price input (the tables are baked); offers check the seller's signature.
+/// Measured on the mainnet v4 templates after the audit's C2 fix (2026-10-09; the fee loop
+/// now reads every input's covenant id): register at most 92,048 script units (8 inputs,
+/// 8 outputs, a 32-char name; 9 covers 99,999), merge 50,084 (5 covers 59,999), extend /
+/// renew ~22,200 (2 covers 29,999). Before the fix, register 8 and merge 4 sufficed.
+/// `KACHAT_VECTORS_MEASURE=1` prints every input's measured budget and units instead of
+/// failing on one above this table.
 const RECOMMENDED_BUDGETS_V4: &[(&str, u16)] = &[
     ("p2pk", 10),
     ("commit", 10),
-    ("gap.register", 8),
-    ("gap.merge", 4),
+    ("gap.register", 9),
+    ("gap.merge", 5),
     ("gap.absorbed", 0),
     ("name.transfer", 12),
     ("name.list", 12),
@@ -112,9 +120,16 @@ fn recommended_budgets() -> Vec<(&'static str, u16)> {
 }
 
 fn main() -> Result<()> {
-    let arg1 = std::env::args().nth(1).ok_or_else(|| anyhow!("usage: kachat-names-vectors <out.json> | check <port-built.json>"))?;
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--network") {
+        ensure!(args.len() >= 2, "--network needs testnet-10 or mainnet");
+        net::select(&args[1])?;
+        args.drain(..2);
+    }
+    let usage = "usage: kachat-names-vectors [--network mainnet] <out.json> | check <port-built.json>";
+    let arg1 = args.first().cloned().ok_or_else(|| anyhow!(usage))?;
     if arg1 == "check" {
-        let file = std::env::args().nth(2).ok_or_else(|| anyhow!("usage: kachat-names-vectors check <port-built.json>"))?;
+        let file = args.get(1).cloned().ok_or_else(|| anyhow!(usage))?;
         return check(&PathBuf::from(file));
     }
     let out = PathBuf::from(arg1);
@@ -133,12 +148,26 @@ fn main() -> Result<()> {
     let paths = v5.as_ref().map(|v| Paths::at(v.root.clone())).unwrap_or_else(|| live_paths.clone());
 
     // ---- the e2e plan, step by step ------------------------------------
-    let mut sim = Sim::new(Templates::load(&paths.root), 100 * SOMPI, start);
+    // Mainnet: real prices (a 5+ name is 35 KAS), so more funding; and the lapse scenario's
+    // backdate scaled to the year clock: registered 2 periods + grace + a day ago, renewed
+    // once (a new period from the old expiry), it is still a day past expiresAt + grace.
+    let funding = if net().mainnet { 1_000 * SOMPI } else { 100 * SOMPI };
+    let mut sim = Sim::new(Templates::load(&paths.root), funding, start);
+    let lapse_backdate = {
+        let p = &sim.templates.params;
+        (2 * p.period_ms + p.grace_ms + 86_400_000) / 60_000
+    };
     let mut migration_rules = Value::Null;
     let mut steps = vec![];
     let mut manifest_json = Value::Null;
     let mut tags = vec![];
     for (step, _) in e2e_steps() {
+        let step = match step {
+            Step::Register { name, years, backdate_minutes } if backdate_minutes > 0 && net().mainnet => {
+                Step::Register { name, years, backdate_minutes: lapse_backdate }
+            }
+            s => s,
+        };
         if matches!(step, Step::Wait(..)) {
             sim.run(&step)?;
             continue;
@@ -220,8 +249,8 @@ fn main() -> Result<()> {
                   randomness); everything else is deterministic.",
         "generator": "tools/kachat-names-cli/src/bin/kachat-names-vectors.rs",
         "rustyKaspa": "a41a333b08848f41bf737b72592e463a6011b8ac",
-        "network": "testnet-10",
-        "addressPrefix": "kaspatest",
+        "network": net().name,
+        "addressPrefix": net().prefix.to_string(),
         "feerate": ops::MIN_FEERATE,
         "minChange": ops::MIN_CHANGE,
         "targetChange": ops::TARGET_CHANGE,
@@ -500,7 +529,10 @@ fn step_json(op: &str, before: &Snapshot, records: Value, args: Value, plan: &Pl
         let role = role(tx, i, &entries[i], kit_tags)?;
         let budget = input.compute_commit.compute_budget().ok_or_else(|| anyhow!("v1 input without a budget"))?;
         let rec = recommended_budgets().iter().find(|(r, _)| *r == role).map(|(_, b)| *b).ok_or_else(|| anyhow!("no budget for {role}"))?;
-        if budget > rec {
+        if std::env::var("KACHAT_VECTORS_MEASURE").is_ok() {
+            let units = plan.built.run_inputs()[i].as_ref().map(|u| format!("{u:?}")).unwrap_or_default();
+            eprintln!("MEASURED {role} {budget} {units} {}", plan.op);
+        } else if budget > rec {
             bail!("{}: input {i} ({role}) measured budget {budget} > recommended {rec}", plan.op);
         }
         inputs.push(json!({
@@ -607,7 +639,10 @@ fn extra_cases(t: &Templates, registry_id: kaspa_hashes::Hash, wall: i64, tags: 
     {
         let name = "abcdefghijklmnopqrstuvwxyz-01234";
         ensure!(name.len() == 32);
-        let wallet: Vec<Utxo> = (0..7).map(|i| synthetic(0xd0 + i, i as u32, 45_000_000, p2pk_spk(&me), block.daa - 5_000, None)).collect();
+        // seven UTXOs, of which the 6 that fit (8 inputs with the gap and the commit) just
+        // cover the price, the bond, the gap value and the fee
+        let each = if net().mainnet { (p.register_prices[4] + p.renew_prices[4] + p.bond + p.gap_value) / 6 + 10_000_000 } else { 45_000_000 };
+        let wallet: Vec<Utxo> = (0..7).map(|i| synthetic(0xd0 + i, i as u32, each, p2pk_spk(&me), block.daa - 5_000, None)).collect();
         let salt = [0x31; 32];
         let c = CommitRec { name: name.into(), owner: me, salt, value: ops::COMMIT_VALUE, outpoint: None, used_by: None, created_ms: 0 };
         let cu = synthetic(0xc1, 0, ops::COMMIT_VALUE, pay_to_script_hash_script(&commit_redeem(&commitment(name.as_bytes(), &me, &salt), &me)), block.daa - 700, None);
@@ -623,8 +658,8 @@ fn extra_cases(t: &Templates, registry_id: kaspa_hashes::Hash, wall: i64, tags: 
         out.push(step_json("register", &snap(&wallet), recs, args, &plan, tags)?);
     }
 
-    // register a 1-character name for 2 periods (40 TKAS for the first on testnet, 10 for
-    // the second) inside a narrower gap
+    // register a 1-character name for 2 periods (the 1-char registration price + one 1-char
+    // renewal: 40 + 10 TKAS on testnet, 4,000 + 1,000 KAS on mainnet) inside a narrower gap
     {
         let name = "x";
         let key = name_key(name.as_bytes());
@@ -633,7 +668,7 @@ fn extra_cases(t: &Templates, registry_id: kaspa_hashes::Hash, wall: i64, tags: 
         let mut hi = key;
         hi[0] = 0xff;
         let lo = if lo < key { lo } else { ZERO32 };
-        let wallet = vec![synthetic(0xd8, 3, 200 * SOMPI, p2pk_spk(&me), block.daa - 5_000, None)];
+        let wallet = vec![synthetic(0xd8, 3, if net().mainnet { 5_010 * SOMPI } else { 200 * SOMPI }, p2pk_spk(&me), block.daa - 5_000, None)];
         let salt = [0x32; 32];
         let cu = synthetic(0xc2, 0, ops::COMMIT_VALUE, pay_to_script_hash_script(&commit_redeem(&commitment(name.as_bytes(), &me, &salt), &me)), block.daa - 600, None);
         let c = CommitRec { name: name.into(), owner: me, salt, value: ops::COMMIT_VALUE, outpoint: Some(cu.outpoint), used_by: None, created_ms: 0 };
@@ -646,6 +681,33 @@ fn extra_cases(t: &Templates, registry_id: kaspa_hashes::Hash, wall: i64, tags: 
         let args = json!({ "years": 2, "now": now });
         let recs = json!({ "gap": gap_json(&g, &gu), "commit": commit_json(&c, &cu) });
         out.push(step_json("register", &snap(&wallet), recs, args, &plan, tags)?);
+    }
+
+    // C3, the launch-day race: the first registration of "retry-me" lost the genesis gap to
+    // another name ("winner"), whose registration split it. The app retries at once with the
+    // same commit (still unspent) against the gap that now holds the key.
+    {
+        let name = "retry-me";
+        let key = name_key(name.as_bytes());
+        let won = name_key(b"winner");
+        let (lo, hi) = if key < won { (ZERO32, won) } else { (won, FF32) };
+        let wallet = vec![synthetic(0xd7, 0, if net().mainnet { 40 * SOMPI } else { 5 * SOMPI }, p2pk_spk(&me), block.daa - 5_000, None)];
+        let salt = [0x35; 32];
+        let cu = synthetic(0xc4, 0, ops::COMMIT_VALUE, pay_to_script_hash_script(&commit_redeem(&commitment(name.as_bytes(), &me, &salt), &me)), block.daa - 700, None);
+        let c = CommitRec { name: name.into(), owner: me, salt, value: ops::COMMIT_VALUE, outpoint: Some(cu.outpoint), used_by: None, created_ms: 0 };
+        // the gap the winner's registration created (its output 0 or 1)
+        let g = GapRec { outpoint: TransactionOutpoint::new(TransactionId::from_bytes([0xa3; 32]), if key < won { 0 } else { 1 }), lo, hi, value: p.gap_value };
+        let gu = synthetic(0xa3, g.outpoint.index, p.gap_value, env.kit.gap.spk(&gap_state(&lo, &hi)), block.daa - 50, id);
+        let now = ops::register_now(&env);
+        let plan = ops::register(&env, &wallet, &g, &gu, &c, &cu, 1, now)?;
+        let args = json!({ "years": 1, "now": now });
+        let recs = json!({ "gap": gap_json(&g, &gu), "commit": commit_json(&c, &cu) });
+        let mut v = step_json("register", &snap(&wallet), recs, args, &plan, tags)?;
+        v["case"] = json!(
+            "C3 retry: the first attempt spent the genesis gap (00..00, ff..ff), which another registration (\"winner\") took first; \
+             this retry uses the same, still unspent commit against the gap that now holds the key"
+        );
+        out.push(v);
     }
 
     // a commit whose leftover is below MIN_CHANGE: no change output, the rest goes to the miner
@@ -692,14 +754,14 @@ fn extra_cases(t: &Templates, registry_id: kaspa_hashes::Hash, wall: i64, tags: 
         out.push(step_json("buy", &snap(&wallet), json!({ "name": name_json(&n, &u) }), json!({}), &plan, tags)?);
     }
 
-    // renew in grace: another owner's 4-character name, expired 5 minutes ago (grace is 6 hours),
-    // for 2 periods
+    // renew in grace: another owner's 4-character name, expired 5 minutes ago (grace is 6 hours on
+    // testnet, 90 days on mainnet), for 2 periods
     {
         let e = wall - 5 * 60_000;
         let f = NameFields::new(b"four", &stranger, 0, e - period, e);
         let u = name_utxo(&f, 0xb4);
         let n = rec(f, &u);
-        let w = vec![synthetic(0xe3, 0, 20 * SOMPI, p2pk_spk(&me), block.daa - 5_000, None)];
+        let w = vec![synthetic(0xe3, 0, if net().mainnet { 130 * SOMPI } else { 20 * SOMPI }, p2pk_spk(&me), block.daa - 5_000, None)];
         let plan = ops::renew(&env, &w, &n, &u, 2)?;
         ensure!(plan.built.tx.lock_time as i64 == ops::register_now(&env), "renew in grace: lock time = now - 3 min");
         ensure!(plan.price_fee == 2 * p.renew_prices[3], "2 periods at the 4-char renewal price");
@@ -769,7 +831,7 @@ fn extra_cases(t: &Templates, registry_id: kaspa_hashes::Hash, wall: i64, tags: 
     }
 
     // anyone reclaims another owner's lapsed name (expired 15 minutes past its grace: 6 hours
-    // on the testnet day clock); the caller keeps the bounty
+    // on the testnet day clock, 90 days on mainnet); the caller keeps the bounty
     {
         let expired = wall - p.grace_ms - 15 * 60_000;
         ensure!(expired + p.grace_ms < block.time_ms as i64, "the lapsed name must be past expiresAt + grace at the median time");

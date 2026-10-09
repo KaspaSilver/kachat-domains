@@ -171,7 +171,11 @@ Dispatch tags are the same on both networks, and `tests/genesis.rs` pins them:
 
 ## Cost per operation
 
-From `cargo test --test report -- --nocapture` (testnet-10 templates, 2026-10-08).
+From `cargo test --test report -- --nocapture` (testnet-10 v4 templates, 2026-10-08, **before
+the audit's C2 fix**). The fix makes the fee loop read every input's covenant id, which costs
+script units: on the mainnet templates (2026-10-09) register now needs up to 92,048 units
+(budget 9) and merge 50,084 (budget 5), and extend / renew about 22,200 (budget 2). The fixed
+table below is the current one.
 - **Masses** come from rusty-kaspa's `MassCalculator`.
 - **Min fee** = 100 sompi/gram × max(compute, normalized transient), the post-Toccata relay floor.
 - **Budget** = the smallest covering compute budget, measured by the engine. 1 unit = 10,000
@@ -203,9 +207,10 @@ From `cargo test --test report -- --nocapture` (testnet-10 templates, 2026-10-08
 **Signatures dominate.** Each signature check costs 100,000 script units (10 budget units).
 
 **Fixed budgets for an app without a script engine** (`RECOMMENDED_BUDGETS` in
-`src/bin/kachat-names-vectors.rs`, which checks every measured budget fits): register 8, merge 4,
-absorbed 0, transfer/list 12, buy/extend/renew 2, release 10, reclaim 0, accept 17 (measured 15),
-decline/withdraw 10, refund 0, commit/P2PK 10.
+`src/bin/kachat-names-vectors.rs`, which checks every measured budget fits). For v4 (mainnet):
+register 9, merge 5, absorbed 0, transfer/list 12, buy/extend/renew 2, release 10, reclaim 0,
+accept 17 (measured 16), decline/withdraw 10, refund 0, commit/P2PK 10. Registry v5 (testnet)
+uses register 13, merge 7, absorbed 1, import 24 for its larger gap; the rest is the same.
 
 ## Run it (Docker, Kaspa Quick Start)
 
