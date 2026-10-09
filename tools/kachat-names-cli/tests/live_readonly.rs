@@ -4,7 +4,7 @@
 //! Optional: KACHAT_TN10_NODE=grpc://host:16210. Nothing is ever submitted.
 
 use kachat_names_cli::{
-    net::{NETWORK, p2pk_address},
+    net::{net, p2pk_address},
     node::Node,
     scan::view_of,
 };
@@ -18,7 +18,7 @@ fn node_url() -> Option<String> {
 async fn node_is_testnet10_synced_and_indexed() {
     let node = Node::connect(node_url().as_deref(), true).await.expect("connect");
     let p = node.check_network().await.expect("testnet-10 node");
-    assert_eq!(p.network, NETWORK);
+    assert_eq!(p.network, net().name);
     let info = node.info().await.expect("GetInfo");
     println!("{} {} synced={} utxoindex={} daa={}", node.url, info.server_version, info.is_synced, info.is_utxo_indexed, p.virtual_daa);
     // an address nobody uses: empty

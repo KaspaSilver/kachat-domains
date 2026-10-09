@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    net::{NETWORK, PARAMS_FILE, spk_address},
+    net::{net, spk_address},
     ops::Plan,
     paths::Paths,
     registry::Registry,
@@ -85,7 +85,7 @@ pub fn build(paths: &Paths, kit: &Kit, plan: &Plan, deployer: &str, scan_from: O
                 "templateHash": hex(&t.template_hash),
                 "bytecodeSha256": hex(&Sha256::digest(&t.bytecode)),
                 "dispatchTags": tags,
-                "path": format!("artifacts/{PARAMS_FILE}/KachatOffer.json"),
+                "path": format!("artifacts/{}/KachatOffer.json", net().params_file),
                 "note": "compiled for registryCovenantId with the pinned compiler library; scripts/build.sh writes the same bytes once params carry it",
             }),
         );
@@ -122,7 +122,7 @@ pub fn build(paths: &Paths, kit: &Kit, plan: &Plan, deployer: &str, scan_from: O
         "name": "kachat-names",
         "registryVersion": version,
         "snapshot": snapshot,
-        "network": NETWORK,
+        "network": net().name,
         "status": if dry_run { "dry run: NOT broadcast, the registry does not exist" } else { "deployed" },
         "compiler": params["compiler"],
         "params": p,
@@ -159,7 +159,7 @@ pub fn write(path: &Path, v: &Value) -> Result<()> {
 
 pub fn load(path: &Path, kit_check: Option<&Kit>) -> Result<Deployed> {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(path).with_context(|| format!("{}: no manifest", path.display()))?)?;
-    ensure!(v["network"] == NETWORK, "{}: manifest is for {}", path.display(), v["network"]);
+    ensure!(v["network"] == net().name, "{}: manifest is for {}", path.display(), v["network"]);
     ensure!(
         matches!(v["registryVersion"].as_i64(), Some(4) | Some(5)),
         "{}: not a registry v4 or v5 manifest (registry v{}; a new version needs its own genesis: archive the old manifest first)",
@@ -206,7 +206,7 @@ pub fn load(path: &Path, kit_check: Option<&Kit>) -> Result<Deployed> {
         let tiers = |t: &[u64; 5]| json!({ "len1": t[0], "len2": t[1], "len3": t[2], "len4": t[3], "len5plus": t[4] });
         ensure!(
             v["params"]["prices"] == json!({ "register": tiers(&kit.params.register_prices), "renew": tiers(&kit.params.renew_prices) }),
-            "manifest price tables differ from params/{PARAMS_FILE}.json"
+            "manifest price tables differ from params/{}.json", net().params_file
         );
     }
     Ok(d)
@@ -228,7 +228,7 @@ pub fn fill_registry_id(paths: &Paths, id: Hash) -> Result<()> {
 /// `scripts/build.py` accepts to build the offer artifact (and the name and gap).
 pub fn dryrun_params(paths: &Paths, registry_id: Hash) -> Result<std::path::PathBuf> {
     let text = std::fs::read_to_string(paths.params())?;
-    let out = paths.dryrun_dir().join(format!("params-{PARAMS_FILE}.json"));
+    let out = paths.dryrun_dir().join(format!("params-{}.json", net().params_file));
     std::fs::create_dir_all(paths.dryrun_dir())?;
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     let at = lines

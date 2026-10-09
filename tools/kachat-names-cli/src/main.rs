@@ -1,11 +1,14 @@
-//! `kachat-names`: testnet-10 deployment CLI for the .kachat name covenants
+//! `kachat-names`: deployment CLI for the .kachat name covenants
 //! (registry v4: fixed register and renew tables baked into the templates, one
 //! genesis, seller-bound offers, the short clock).
 //!
 //! Every spending command builds the exact transaction shape of the README,
 //! validates it locally with rusty-kaspa's consensus TransactionValidator and
 //! prints a dry-run summary. Only `--submit` broadcasts, and only to a node
-//! that reports `testnet-10`. There is no mainnet mode.
+//! that reports the selected network: testnet-10 by default, mainnet with
+//! `--network mainnet`, where `--submit` also needs an explicit `--node` and a
+//! `--max-fee` cap, and the testing aids (`--backdate-minutes`, `e2e-plan`)
+//! are refused.
 
 use std::path::PathBuf;
 
@@ -14,7 +17,7 @@ use clap::{Parser, Subcommand};
 use kachat_names_cli::{
     commits::{self, CommitRec},
     keys, manifest,
-    net::{NETWORK, consensus_params, p2pk_address, parse_owner_address, spk_address},
+    net::{self, consensus_params, net, p2pk_address, parse_owner_address, spk_address},
     node::{DagPoint, Node},
     ops::{self, Env, ExitParts, Plan, Templates},
     paths::Paths,
@@ -31,11 +34,19 @@ use kaspa_txscript::pay_to_script_hash_script;
 use secp256k1::Keypair;
 
 #[derive(Parser)]
-#[command(name = "kachat-names", about = "testnet-10 CLI for the .kachat name covenants (dry run unless --submit)")]
+#[command(name = "kachat-names", about = "CLI for the .kachat name covenants (dry run unless --submit)")]
 struct Cli {
-    /// gRPC node, e.g. grpc://host:16210 (default: discover through the testnet-10 DNS seeders)
+    /// testnet-10 or mainnet (params/<network>.json, artifacts/, manifests/, state/, .secrets/<network>-deployer.key)
+    #[arg(long, global = true, default_value = "testnet-10")]
+    network: String,
+    /// gRPC node, e.g. grpc://host:16210 on testnet-10, :16110 on mainnet (default: discover
+    /// through the network's DNS seeders; mainnet --submit requires it)
     #[arg(long, global = true)]
     node: Option<String>,
+    /// refuse to submit a transaction whose network fee (the fee beyond any price) is above
+    /// this many KAS; required for mainnet --submit
+    #[arg(long, global = true)]
+    max_fee: Option<String>,
     /// kachat-domains checkout (default: found from the current directory)
     #[arg(long, global = true)]
     repo: Option<PathBuf>,
@@ -50,9 +61,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Create the deployer key (.secrets/testnet10-deployer.key, mode 600); prints only its address
+    /// Create the deployer key (.secrets/<network>-deployer.key, mode 600); prints only its address
     Keygen,
-    /// Print the deployer's kaspatest: address
+    /// Print the deployer's address
     Address,
     /// Connectivity report: GetInfo, network, DAG point, and the deployer's UTXOs (read-only)
     NodeInfo,
@@ -60,7 +71,7 @@ enum Cmd {
     Balance,
     /// Mint the registry: one deployer UTXO -> the lone genesis gap (+ change)
     Genesis {
-        /// dry run only: pretend the deployer holds one UTXO of this many TKAS (cannot be submitted)
+        /// dry run only: pretend the deployer holds one UTXO of this many KAS (cannot be submitted)
         #[arg(long)]
         assume_utxo: Option<String>,
     },
@@ -102,7 +113,8 @@ enum Cmd {
         #[arg(long, default_value_t = 1)]
         years: i64,
         /// move `now` this many minutes into the past (testing reclaim on the testnet day clock
-        /// with its 6-hour grace: 3300 (55 h) leaves a 1-period name lapsed even after one renewal)
+        /// with its 6-hour grace: 3300 (55 h) leaves a 1-period name lapsed even after one renewal;
+        /// refused on mainnet)
         #[arg(long, default_value_t = 0)]
         backdate_minutes: i64,
     },
@@ -130,13 +142,13 @@ enum Cmd {
         #[arg(long, default_value_t = 1)]
         years: i64,
     },
-    /// Transfer a name owned by the deployer to a kaspatest: Schnorr address
+    /// Transfer a name owned by the deployer to a Schnorr address of the network
     Transfer { name: String, to: String },
-    /// List a name for sale (price in TKAS; 0 delists)
+    /// List a name for sale (price in KAS; 0 delists)
     List { name: String, price: String },
     /// Buy a listed name for the deployer
     Buy { name: String },
-    /// Lock TKAS as an offer for a registered name (bound to its current owner)
+    /// Lock KAS as an offer for a registered name (bound to its current owner)
     Offer {
         name: String,
         amount: String,
@@ -186,7 +198,7 @@ enum Cmd {
         #[arg(long)]
         scan: bool,
     },
-    /// The ordered command list for a full testnet run, and the TKAS it needs
+    /// The ordered command list for a full testnet run, and the TKAS it needs (testnet-10 only)
     E2ePlan {
         /// also print every simulated transaction (synthetic UTXOs, local validator)
         #[arg(long)]
@@ -196,6 +208,7 @@ enum Cmd {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    net::select(&cli.network)?;
     let paths = Paths::find(cli.repo.as_deref())?;
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(run(cli, paths))
@@ -222,6 +235,7 @@ async fn run(cli: Cli, paths: Paths) -> Result<()> {
             ensure!(!cli.submit, "snapshot sends nothing");
             if let Some(file) = check {
                 let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(file)?)?;
+                ensure!(v["network"] == net().name, "{} is a {} snapshot, not {}", file.display(), v["network"], net().name);
                 let snap = kachat_names_cli::snapshot::check_file(&v)?;
                 println!("OK  {} names, root {} (rebuilt from the entries; every stored proof matches)", snap.entries.len(), hex(&snap.root()));
                 return Ok(());
@@ -237,7 +251,7 @@ async fn run(cli: Cli, paths: Paths) -> Result<()> {
             let grace = Templates::load(&paths.root).params.grace_ms;
             let at_ms = at.unwrap_or_else(now_ms);
             let taken = kachat_names_cli::snapshot::take(&reg, at_ms, grace);
-            let v = kachat_names_cli::snapshot::to_json(&taken, &reg, NETWORK, at_ms, grace);
+            let v = kachat_names_cli::snapshot::to_json(&taken, &reg, net().name, at_ms, grace);
             let dir = paths.root.join("manifests").join("snapshots");
             std::fs::create_dir_all(&dir)?;
             let out = dir.join(format!("{}-{at_ms}.json", &reg.registry_id.to_string()[..16]));
@@ -274,7 +288,10 @@ async fn run(cli: Cli, paths: Paths) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::E2ePlan { simulate } => e2e_plan(&paths, *simulate),
+        Cmd::E2ePlan { simulate } => {
+            ensure!(!net().mainnet, "e2e-plan is the testnet-10 test run");
+            e2e_plan(&paths, *simulate)
+        }
         _ => live(cli, paths).await,
     }
 }
@@ -350,6 +367,7 @@ fn load_snapshot_items(paths: &Paths, file: Option<&std::path::Path>) -> Result<
         }
     };
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).with_context(|| path.display().to_string())?)?;
+    ensure!(v["network"] == net().name, "{} is a {} snapshot, not {}", path.display(), v["network"], net().name);
     ops::snapshot_items(&v)
 }
 
@@ -364,6 +382,8 @@ struct Live {
     deployer: Keypair,
     templates: Templates,
     submit: bool,
+    /// --max-fee in sompi: the most network fee a submitted transaction may leave
+    max_fee: Option<u64>,
     verbose: bool,
 }
 
@@ -379,7 +399,7 @@ impl Live {
     /// The deployer's spendable P2PK UTXOs (coinbase only once mature).
     async fn wallet(&self) -> Result<Vec<Utxo>> {
         let addr = p2pk_address(&self.me());
-        ensure!(addr.prefix == kaspa_addresses::Prefix::Testnet, "deployer address is not kaspatest:");
+        ensure!(addr.prefix == net().prefix, "deployer address is not {}:", net().prefix);
         let maturity = consensus_params().coinbase_maturity();
         let spk = p2pk_spk(&self.me());
         Ok(self
@@ -444,7 +464,19 @@ impl Live {
 
     /// Print, and with --submit broadcast. Returns whether it was submitted.
     async fn finish(&self, plan: &Plan) -> Result<bool> {
+        self.finish_then(plan, || Ok(())).await
+    }
+
+    /// [`Live::finish`], running `after_submit` as soon as the node took the
+    /// transaction, before waiting for its acceptance (the genesis writes its
+    /// manifest there, so an interrupted wait cannot lose the registry id).
+    async fn finish_then(&self, plan: &Plan, after_submit: impl FnOnce() -> Result<()>) -> Result<bool> {
         println!("{}", summary::render(plan, self.submit));
+        if let Some(cap) = self.max_fee
+            && plan.network_fee > cap
+        {
+            bail!("the network fee {} is above --max-fee {}", fmt_kas(plan.network_fee), fmt_kas(cap));
+        }
         if !self.submit {
             println!("dry run: nothing was broadcast (add --submit to send it)");
             return Ok(false);
@@ -452,10 +484,12 @@ impl Live {
         if !plan.is_valid() {
             bail!("refusing to submit: the transaction does not pass the local checks");
         }
-        ensure!(self.point.network == NETWORK, "node network {}", self.point.network);
+        ensure!(self.point.network == net().name, "node network {}", self.point.network);
+        ensure!(!net().mainnet || self.max_fee.is_some(), "mainnet --submit needs --max-fee");
         let id = self.node.submit(&plan.built.tx).await?;
         ensure!(id == plan.txid(), "node returned txid {id}, expected {}", plan.txid());
         println!("SUBMITTED {id} to {}", self.node.url);
+        after_submit()?;
         self.wait_accepted(plan).await;
         Ok(true)
     }
@@ -499,6 +533,15 @@ async fn live(cli: Cli, paths: Paths) -> Result<()> {
     {
         bail!("--assume-utxo is a dry-run aid; it cannot be submitted");
     }
+    if net().mainnet {
+        // no discovered node and no uncapped fee for real money
+        ensure!(!cli.submit || cli.node.is_some(), "mainnet --submit needs an explicit --node (your own node)");
+        ensure!(!cli.submit || cli.max_fee.is_some(), "mainnet --submit needs --max-fee");
+        if let Cmd::Register { backdate_minutes, .. } = &cli.cmd {
+            ensure!(*backdate_minutes == 0, "--backdate-minutes is a testnet aid; refused on mainnet");
+        }
+    }
+    let max_fee = cli.max_fee.as_deref().map(parse_kas).transpose()?;
     let node = Node::connect(cli.node.as_deref(), cli.verbose).await?;
     let point = node.check_network().await?;
     eprintln!(
@@ -510,7 +553,7 @@ async fn live(cli: Cli, paths: Paths) -> Result<()> {
         fmt_ms(point.past_median_time as i64),
         point.feerate
     );
-    let l = Live { templates: Templates::load(&paths.root), paths, node, point, deployer, submit: cli.submit, verbose: cli.verbose };
+    let l = Live { templates: Templates::load(&paths.root), paths, node, point, deployer, submit: cli.submit, max_fee, verbose: cli.verbose };
     let res = command(&l, &cli.cmd).await;
     l.node.disconnect().await;
     res
@@ -548,7 +591,7 @@ async fn command(l: &Live, cmd: &Cmd) -> Result<()> {
                 "GetInfo       server {}, synced {}, utxo index {}, mempool {}",
                 info.server_version, info.is_synced, info.is_utxo_indexed, info.mempool_size
             );
-            println!("network       {} (required: {NETWORK})", l.point.network);
+            println!("network       {} (required: {})", l.point.network, net().name);
             println!("virtual DAA   {}", l.point.virtual_daa);
             println!("median time   {} ({})", l.point.past_median_time, fmt_ms(l.point.past_median_time as i64));
             println!("sink          {}", l.point.sink);
@@ -825,9 +868,10 @@ async fn genesis(l: &Live, assume_utxo: Option<&str>) -> Result<()> {
     let deployer_addr = keys::address_of(&l.deployer);
     // the scanner starts from the sink seen before the genesis
     let scan_from = Some(l.point.sink);
-    let submitted = l.finish(&plan).await?;
-    let m = manifest::build(paths, &kit, &plan, &deployer_addr, scan_from, !submitted)?;
-    if submitted {
+    // Built before the submit, written right after it (before the acceptance wait), so an
+    // interrupted run still leaves the manifest, the params id and the state behind.
+    let m = manifest::build(paths, &kit, &plan, &deployer_addr, scan_from, false)?;
+    let record = || -> Result<()> {
         manifest::write(&paths.manifest(), &m)?;
         manifest::fill_registry_id(paths, id)?;
         let d = manifest::load(&paths.manifest(), Some(&kit))?;
@@ -835,9 +879,16 @@ async fn genesis(l: &Live, assume_utxo: Option<&str>) -> Result<()> {
         println!("manifest  {}", paths.rel(&paths.manifest()));
         println!("params    {} registryCovenantId = {id}", paths.rel(&paths.params()));
         println!("state     {}", paths.rel(&paths.state()));
-        println!("next: ./scripts/build.sh   (builds artifacts/testnet10/KachatOffer.json for {id}); commit params, artifacts and the manifest");
+        Ok(())
+    };
+    if l.finish_then(&plan, record).await? {
+        println!(
+            "next: ./scripts/build.sh   (builds artifacts/{}/KachatOffer.json for {id}); commit params, artifacts and the manifest",
+            net().params_file
+        );
         return Ok(());
     }
+    let m = manifest::build(paths, &kit, &plan, &deployer_addr, scan_from, true)?;
     let mp = paths.dryrun_manifest();
     manifest::write(&mp, &m)?;
     println!("would-be manifest written to {} (registry id {id})", paths.rel(&mp));
@@ -846,7 +897,7 @@ async fn genesis(l: &Live, assume_utxo: Option<&str>) -> Result<()> {
     demo_build(paths, &kit, &pp)
 }
 
-/// The two tables baked into the gap and the name, from params/testnet10.json (which
+/// The two tables baked into the gap and the name, from params/<network>.json (which
 /// the templates in use are compiled from), checked against the deployed manifest's.
 fn prices(paths: &Paths) -> Result<()> {
     let p = &Templates::load(&paths.root).params;
@@ -863,7 +914,8 @@ fn prices(paths: &Paths) -> Result<()> {
     if paths.manifest().exists() {
         let m: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(paths.manifest())?)?;
         let ours: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(paths.params())?)?;
-        if m["registryVersion"].as_i64() != Some(4) {
+        // v5 is v4 plus the migration import: the same two tables
+        if !matches!(m["registryVersion"].as_i64(), Some(4 | 5)) {
             println!("note: {} is a registry v{} manifest, not these tables", paths.rel(&paths.manifest()), m["registryVersion"]);
         } else if m["params"]["prices"] != ours["prices"] {
             println!("WARNING: the deployed registry ({}) bakes other prices than params", paths.rel(&paths.manifest()));
@@ -1015,7 +1067,7 @@ fn e2e_plan(paths: &Paths, simulate: bool) -> Result<()> {
     let need = b.peak_need.max(b.funding - b.final_balance).div_ceil(SOMPI) * SOMPI;
     let (_, b_min) =
         plan::simulate(Templates::load(&paths.root), need, wall).map_err(|e| anyhow!("the plan fails with {}: {e}", fmt_kas(need)))?;
-    println!("# .kachat names: end-to-end run on {NETWORK}");
+    println!("# .kachat names: end-to-end run on {}", net().name);
     println!("# deployer {me}");
     println!("#");
     let t = Templates::load(&paths.root);

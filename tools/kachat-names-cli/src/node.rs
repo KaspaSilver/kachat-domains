@@ -2,7 +2,7 @@
 //! one write path, [`Node::submit`], which the CLI calls only with `--submit`.
 //!
 //! Every connection is checked before use: the node must report network
-//! `testnet-10`, be synced and keep a UTXO index. There is no other network.
+//! the selected network (`--network`), be synced and keep a UTXO index.
 
 use std::{
     net::{SocketAddr, ToSocketAddrs},
@@ -18,7 +18,7 @@ use kaspa_rpc_core::{
     GetVirtualChainFromBlockV2Response, RpcDataVerbosityLevel, RpcTransaction, api::rpc::RpcApi, notify::mode::NotificationMode,
 };
 
-use crate::net::{GRPC_PORT, NETWORK, TN10_DNS_SEEDERS};
+use crate::net::net;
 
 /// What the CLI needs from the virtual state for validation and fees.
 #[derive(Clone, Debug)]
@@ -64,8 +64,8 @@ impl Node {
     }
 
     /// Connect to `--node grpc://host:port`, or discover a node through the
-    /// testnet-10 DNS seeders: the first that answers on the gRPC port, says
-    /// `testnet-10`, is synced and has a UTXO index.
+    /// network's DNS seeders: the first that answers on the gRPC port, reports
+    /// the network, is synced and has a UTXO index.
     pub async fn connect(explicit: Option<&str>, verbose: bool) -> Result<Node> {
         if let Some(url) = explicit {
             let url = if url.starts_with("grpc://") { url.to_string() } else { format!("grpc://{url}") };
@@ -75,7 +75,7 @@ impl Node {
         }
         let candidates = seed_candidates();
         if candidates.is_empty() {
-            bail!("no testnet-10 DNS seeder resolved; pass --node grpc://host:{GRPC_PORT}");
+            bail!("no {} DNS seeder resolved; pass --node grpc://host:{}", net().name, net().grpc_port);
         }
         let mut last_err = None;
         for addr in candidates.iter().take(24) {
@@ -101,15 +101,15 @@ impl Node {
                 Err(e) => last_err = Some(e),
             }
         }
-        Err(last_err.unwrap_or_else(|| anyhow!("no seeded testnet-10 node answered on gRPC port {GRPC_PORT}")))
-            .context("node discovery failed; pass --node grpc://host:16210")
+        Err(last_err.unwrap_or_else(|| anyhow!("no seeded {} node answered on gRPC port {}", net().name, net().grpc_port)))
+            .with_context(|| format!("node discovery failed; pass --node grpc://host:{}", net().grpc_port))
     }
 
-    /// Refuse anything but a synced, UTXO-indexed testnet-10 node.
+    /// Refuse anything but a synced, UTXO-indexed node of the selected network.
     pub async fn check_network(&self) -> Result<DagPoint> {
         let point = self.dag_point().await?;
-        if point.network != NETWORK {
-            bail!("{} reports network {:?}; this tool runs on {NETWORK} only", self.url, point.network);
+        if point.network != net().name {
+            bail!("{} reports network {:?}; this run is on {}", self.url, point.network, net().name);
         }
         if !point.is_synced {
             bail!("{} is not synced", self.url);
@@ -189,11 +189,11 @@ impl Node {
     }
 }
 
-/// Resolve every testnet-10 seeder (all A records) on the gRPC port, deduplicated.
+/// Resolve every seeder of the network (all A records) on the gRPC port, deduplicated.
 pub fn seed_candidates() -> Vec<SocketAddr> {
     let mut out: Vec<SocketAddr> = Vec::new();
-    for host in TN10_DNS_SEEDERS {
-        if let Ok(addrs) = (*host, GRPC_PORT).to_socket_addrs() {
+    for host in net().seeders {
+        if let Ok(addrs) = (*host, net().grpc_port).to_socket_addrs() {
             for a in addrs {
                 if a.is_ipv4() && !out.contains(&a) {
                     out.push(a);

@@ -18,7 +18,7 @@ use kaspa_hashes::Hash;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::{manifest, net::NETWORK, ops::Templates, paths::Paths, util::hex};
+use crate::{manifest, net::net, ops::Templates, paths::Paths, util::hex};
 
 /// The params the manifest copies from params/<net>.json (the templates bake them all).
 const PARAM_KEYS: &[&str] = &["bond", "gapValue", "tCommit", "maxYears", "periodMs", "graceMs", "renewWindowMs", "prices", "offerMaxFee", "registryVersion", "migration"];
@@ -53,7 +53,7 @@ pub fn verify(paths: &Paths) -> Result<Value> {
     sha.update(text.as_bytes());
     Ok(json!({
         "ok": true,
-        "network": NETWORK,
+        "network": net().name,
         "registryVersion": m["registryVersion"],
         "registryCovenantId": id_hex,
         "genesisTxid": d.genesis_txid.to_string(),
@@ -64,7 +64,7 @@ pub fn verify(paths: &Paths) -> Result<Value> {
             "KachatOffer": hex(&kit.offer.template_hash),
         },
         "params": PARAM_KEYS.iter().map(|k| (k.to_string(), m["params"][*k].clone())).collect::<serde_json::Map<_, _>>(),
-        "manifest": format!("manifests/kachat-names-{NETWORK}.json"),
+        "manifest": format!("manifests/kachat-names-{}.json", net().name),
         "manifestSha256": hex(&sha.finalize()),
         "commit": std::env::var("KACHAT_DOMAINS_COMMIT").ok(),
     }))

@@ -3,13 +3,13 @@
 use anyhow::{Result, anyhow, bail};
 use kaspa_consensus_core::tx::{TransactionId, TransactionOutpoint};
 
-use crate::net::TICKER;
+use crate::net::net;
 
 pub const SOMPI: u64 = 100_000_000;
 
 /// "12.5" (TKAS) -> sompi. At most 8 decimals.
 pub fn parse_kas(s: &str) -> Result<u64> {
-    let s = s.trim().trim_end_matches(TICKER).trim_end_matches("KAS").trim();
+    let s = s.trim().trim_end_matches(net().ticker).trim_end_matches("KAS").trim();
     let (int, frac) = s.split_once('.').unwrap_or((s, ""));
     if int.is_empty() && frac.is_empty() || frac.len() > 8 || !int.chars().chain(frac.chars()).all(|c| c.is_ascii_digit()) {
         bail!("bad amount {s:?} (use e.g. 12.5)");
@@ -20,7 +20,7 @@ pub fn parse_kas(s: &str) -> Result<u64> {
 }
 
 pub fn fmt_kas(sompi: u64) -> String {
-    format!("{}.{:08} {TICKER}", sompi / SOMPI, sompi % SOMPI)
+    format!("{}.{:08} {}", sompi / SOMPI, sompi % SOMPI, net().ticker)
 }
 
 pub fn fmt_kas_signed(v: i64) -> String {

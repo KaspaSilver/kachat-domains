@@ -1,5 +1,5 @@
 //! The deployer key: one fresh secp256k1 Schnorr key, created by `keygen` at
-//! `.secrets/testnet10-deployer.key` (mode 600). It is the only key this
+//! `.secrets/<network>-deployer.key` (mode 600: `testnet10-` or `mainnet-`). It is the only key this
 //! tool ever reads; the key itself is never printed, only its address.
 
 use std::{

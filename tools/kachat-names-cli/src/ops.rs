@@ -25,7 +25,7 @@ use secp256k1::Keypair;
 
 use crate::{
     commits::CommitRec,
-    net::{PARAMS_FILE, consensus_params, p2pk_address, spk_address},
+    net::{consensus_params, net, p2pk_address, spk_address},
     registry::{GapRec, NameRec, OfferRec},
     util::{SOMPI, fmt_dur, fmt_kas, fmt_ms, hex},
 };
@@ -60,7 +60,7 @@ pub struct Templates {
 }
 
 fn params_registry_id(root: &Path) -> Option<String> {
-    std::fs::read_to_string(root.join("params").join(format!("{PARAMS_FILE}.json")))
+    std::fs::read_to_string(root.join("params").join(format!("{}.json", net().params_file)))
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
         .and_then(|v| v["registryCovenantId"].as_str().map(str::to_owned))
@@ -68,15 +68,15 @@ fn params_registry_id(root: &Path) -> Option<String> {
 
 impl Templates {
     pub fn load(root: &Path) -> Templates {
-        Templates { params: NetParams::load_in(root, PARAMS_FILE), root: root.to_path_buf() }
+        Templates { params: NetParams::load_in(root, net().params_file), root: root.to_path_buf() }
     }
 
     /// When the artifact exists, the in-process compile must equal it.
     fn check_artifact(&self, contract: &str, t: &Template, built_for: &str) -> Result<()> {
-        let path = self.root.join("artifacts").join(PARAMS_FILE).join(format!("{contract}.json"));
+        let path = self.root.join("artifacts").join(net().params_file).join(format!("{contract}.json"));
         if path.exists() {
-            let art = Template::load_in(&self.root, PARAMS_FILE, contract);
-            ensure!(art.bytecode == t.bytecode, "artifacts/{PARAMS_FILE}/{contract}.json was built for {built_for}: run ./scripts/build.sh");
+            let art = Template::load_in(&self.root, net().params_file, contract);
+            ensure!(art.bytecode == t.bytecode, "artifacts/{}/{contract}.json was built for {built_for}: run ./scripts/build.sh", net().params_file);
         }
         Ok(())
     }
