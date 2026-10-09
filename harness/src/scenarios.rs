@@ -6,8 +6,9 @@ use secp256k1::Keypair;
 
 /// DAA score at which test commit UTXOs were accepted.
 pub const COMMIT_DAA: u64 = 500_000_000;
-/// Wall-clock "now" used by registrations (2026-09-21T...Z), unix ms.
-pub const NOW_MS: i64 = 1_790_000_000_000;
+/// Wall-clock "now" used by registrations (2026-10-14, after the testnet v5
+/// registry's import deadline of 2026-10-09 10:30 UTC), unix ms.
+pub const NOW_MS: i64 = 1_792_000_000_000;
 /// Network fee the scenarios leave on top of any price.
 pub const NET_FEE: u64 = 1_000_000;
 pub const COMMIT_VALUE: u64 = 20_000_000;

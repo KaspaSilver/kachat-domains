@@ -665,11 +665,24 @@ async fn spend(l: &Live, cmd: &Cmd) -> Result<()> {
             let items = load_snapshot_items(&l.paths, snapshot.as_deref())?;
             let todo: Vec<_> = items.iter().filter(|i| reg.gap_for_key(&i.entry.key).is_some()).collect();
             println!("{} snapshot name(s), {} still to import", items.len(), todo.len());
+            // The node's address index can still list a UTXO the previous import spent for a
+            // moment after acceptance: leave out everything this loop spent, and if a build still
+            // fails the local checks, wait for the index and build again.
+            let mut spent = std::collections::HashSet::new();
             for item in todo {
                 let gap = reg.gap_for_key(&item.entry.key).cloned().expect("filtered");
-                let lives = l.live_utxos(&[(gap.outpoint, gap_spk(&kit, &gap))]).await?;
-                let wallet = l.wallet().await?;
-                let plan = ops::import(&env, &wallet, &gap, &lives[0], item)?;
+                let mut tries = 0;
+                let plan = loop {
+                    let lives = l.live_utxos(&[(gap.outpoint, gap_spk(&kit, &gap))]).await?;
+                    let wallet: Vec<_> = l.wallet().await?.into_iter().filter(|u| !spent.contains(&u.outpoint)).collect();
+                    let plan = ops::import(&env, &wallet, &gap, &lives[0], item)?;
+                    tries += 1;
+                    if plan.validation.is_ok() || tries >= 10 || !l.submit {
+                        break plan;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                };
+                spent.extend(plan.built.tx.inputs.iter().map(|i| i.previous_outpoint));
                 if !l.finish(&plan).await? {
                     println!("dry run: stopping after the first import (each import spends the gap the previous one creates)");
                     return Ok(());

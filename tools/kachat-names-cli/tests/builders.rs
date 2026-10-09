@@ -733,8 +733,8 @@ fn the_manifest_carries_and_verifies_the_genesis_binding() {
     let paths = Paths::find(None).unwrap();
     let (p, kit) = genesis();
     let m = kachat_names_cli::manifest::build(&paths, &kit, &p, "kaspatest:x", None, true).unwrap();
-    // registry v4: one genesis, both tables in params, no price record
-    assert_eq!(m["registryVersion"], 4);
+    // registry v4 / v5: one genesis, both tables in params, no price record
+    assert_eq!(m["registryVersion"], kit.params.registry_version);
     assert!(m.get("priceCovenantId").is_none() && m.get("priceGenesis").is_none() && m["artifacts"].get("KachatPrice").is_none());
     assert_eq!(m["params"]["prices"]["register"]["len5plus"], kit.params.register_prices[4]);
     assert_eq!(m["params"]["prices"]["renew"]["len1"], kit.params.renew_prices[0]);

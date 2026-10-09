@@ -113,8 +113,11 @@ fn a_manifest_template_hash_that_differs_is_refused() {
 #[test]
 fn a_registry_id_that_is_not_the_genesis_binding_is_refused() {
     let root = copy_repo("regid");
-    let id = "e6b7244831004e1db928458bce570347317b50ff124c010d342d73a6c2017f0d";
-    let other = "e6b7244831004e1db928458bce570347317b50ff124c010d342d73a6c2017f0e";
+    // the deployed id, whatever registry is live (a v5 one also names its predecessor's id)
+    let m: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(root.join(MANIFEST)).unwrap()).unwrap();
+    let id = m["registryCovenantId"].as_str().unwrap().to_string();
+    let other = format!("{}{}", &id[..63], if id.ends_with('0') { "1" } else { "0" });
+    let (id, other) = (id.as_str(), other.as_str());
     for f in [MANIFEST, PARAMS] {
         let p = root.join(f);
         std::fs::write(&p, std::fs::read_to_string(&p).unwrap().replace(id, other)).unwrap();
