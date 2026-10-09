@@ -30,7 +30,7 @@
         "len5plus": 8750000
       }
     },
-    "offerMaxFee": 2000000,
+    "offerMaxFee": 10000000,
     "genesisGap": {
       "lo": "0000000000000000000000000000000000000000000000000000000000000000",
       "hi": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
@@ -76,21 +76,21 @@
       "bytecodeSha256": "57e3a3d5bdeed7a88fc1c073d8f1aa3a46e63395a32546409fd4bbc3501e5237"
     },
     "KachatOffer": {
-      "bytecodeLen": 1114,
+      "bytecodeLen": 1117,
       "stateSpan": {
         "offset": 1,
         "len": 108
       },
       "prefixLen": 1,
-      "suffixLen": 1005,
-      "templateHash": "3f7240cdb235a74eddb692d086457b726661038d3203c9d9a79bee4d225ab566",
+      "suffixLen": 1008,
+      "templateHash": "032af8ac5ab19accbb7d11f58d7f155c1217bdcad6b1f79b26411d760ca35988",
       "dispatchTags": {
         "accept": "2e18ed39",
         "decline": "aead5037",
         "refund": "777f5b11",
         "withdraw": "80344ff1"
       },
-      "bytecodeSha256": "be05e9d5dac0284d27648d9975dfdf156ccce023d0c99169bc721c5aaa42ba29"
+      "bytecodeSha256": "fdce80809f9a66c5379c2cff7511ea0f24b36c467f2695c58a316f1bc9c3b403"
     }
   },
   "migration": {

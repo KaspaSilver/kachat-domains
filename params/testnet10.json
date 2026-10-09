@@ -29,7 +29,7 @@
       "len5plus": 8750000
     }
   },
-  "offerMaxFee": 2000000,
+  "offerMaxFee": 10000000,
   "genesisGap": {
     "lo": "0000000000000000000000000000000000000000000000000000000000000000",
     "hi": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
