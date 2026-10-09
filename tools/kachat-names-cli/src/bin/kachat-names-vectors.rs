@@ -70,7 +70,7 @@ use serde_json::{Value, json};
 /// renew are back to their v2 budgets (measured: register at most 85,837 script units,
 /// merge 46,918, extend / renew ~19,940, which budget 1's 19,999 covers by under 60
 /// units: 2 leaves room); offers check the seller's signature.
-const RECOMMENDED_BUDGETS: &[(&str, u16)] = &[
+const RECOMMENDED_BUDGETS_V4: &[(&str, u16)] = &[
     ("p2pk", 10),
     ("commit", 10),
     ("gap.register", 8),
@@ -89,6 +89,28 @@ const RECOMMENDED_BUDGETS: &[(&str, u16)] = &[
     ("offer.refund", 0),
 ];
 
+/// Registry v5 (contracts/v5/KachatGap.sil, 7.7 kB: every gap spend reveals it): the gap
+/// entries need more, and `import` is new. Measured 2026-10-09 (harness report):
+/// register <= 122,889 units (12), merge 69,090 (6), absorbed 15,782 (1), import ~233,000 (23);
+/// each budget leaves headroom. The name and offer contracts are v4's, unchanged.
+const V5_BUDGETS: &[(&str, u16)] = &[("gap.register", 13), ("gap.merge", 7), ("gap.absorbed", 1), ("gap.import", 24)];
+
+static REGISTRY_VERSION: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
+/// The fixed budget table for the registry version these vectors are for.
+fn recommended_budgets() -> Vec<(&'static str, u16)> {
+    let mut t: Vec<(&'static str, u16)> = RECOMMENDED_BUDGETS_V4.to_vec();
+    if *REGISTRY_VERSION.get().unwrap_or(&4) >= 5 {
+        for (role, b) in V5_BUDGETS {
+            match t.iter_mut().find(|(r, _)| r == role) {
+                Some(e) => e.1 = *b,
+                None => t.push((role, *b)),
+            }
+        }
+    }
+    t
+}
+
 fn main() -> Result<()> {
     let arg1 = std::env::args().nth(1).ok_or_else(|| anyhow!("usage: kachat-names-vectors <out.json> | check <port-built.json>"))?;
     if arg1 == "check" {
@@ -96,11 +118,23 @@ fn main() -> Result<()> {
         return check(&PathBuf::from(file));
     }
     let out = PathBuf::from(arg1);
-    let paths = Paths::find(None)?;
+    let live_paths = Paths::find(None)?;
     let wall = NOW_MS + 10 * YEAR_MS;
+    let version = Templates::load(&live_paths.root).params.registry_version;
+    REGISTRY_VERSION.set(version).ok();
+    // Registry v5: the vectors carry their own registry - the live templates and params with a
+    // synthetic migration whose sponsor is these vectors' deployer, so imports can be signed
+    // (the live sponsor is the real deployer, whose key never signs test data).
+    // The v5 registry starts 4 days before `wall`: genesis, imports and the refused early
+    // register happen then; the e2e plan then runs at `wall`, so even its 55-hour backdated
+    // registration is after the deadline.
+    let start = if version >= 5 { wall - 4 * 86_400_000 } else { wall };
+    let v5 = if version >= 5 { Some(v5_vector_repo(&live_paths, start)?) } else { None };
+    let paths = v5.as_ref().map(|v| Paths::at(v.root.clone())).unwrap_or_else(|| live_paths.clone());
 
     // ---- the e2e plan, step by step ------------------------------------
-    let mut sim = Sim::new(Templates::load(&paths.root), 100 * SOMPI, wall);
+    let mut sim = Sim::new(Templates::load(&paths.root), 100 * SOMPI, start);
+    let mut migration_rules = Value::Null;
     let mut steps = vec![];
     let mut manifest_json = Value::Null;
     let mut tags = vec![];
@@ -118,6 +152,46 @@ fn main() -> Result<()> {
             let deployer = p2pk_address(&xonly(&sim.deployer)).to_string();
             manifest_json = manifest::build(&paths, kit, plan, &deployer, None, true)?;
             tags = dispatch_tags(kit);
+            if let Some(v5) = &v5 {
+                // every snapshot name, by its owner (the deployer's own) and by the sponsor
+                for item in &v5.items {
+                    let reg = sim.reg.as_ref().unwrap();
+                    let g = reg.gap_for_key(&item.entry.key).cloned().ok_or_else(|| anyhow!("no gap for {}", item.name))?;
+                    let records = json!({ "gap": gap_json(&g, &live(&sim, &g.outpoint)?) });
+                    let before = Snapshot::of(&sim);
+                    sim.import(item)?;
+                    let plan = sim.plans.last().unwrap();
+                    let args = json!({
+                        "name": item.name,
+                        "owner": hex(&item.entry.owner),
+                        "periodStart": item.entry.period_start,
+                        "expiresAt": item.entry.expires_at,
+                        "index": item.index,
+                        "proof": hex(&item.proof),
+                        "bySponsor": item.entry.owner != xonly(&sim.deployer),
+                    });
+                    steps.push(step_json("import", &before, records, args, plan, &tags)?);
+                }
+                // register before the deadline: the gap refuses it
+                sim.run(&Step::Commit("early-tn"))?;
+                sim.run(&Step::Wait(600, "commit maturity"))?;
+                let refused = sim.run(&Step::Register { name: "early-tn", years: 1, backdate_minutes: 0 });
+                let err = refused.err().ok_or_else(|| anyhow!("register before the deadline was accepted"))?.to_string();
+                migration_rules = json!({
+                    "registerOpensAt": v5.deadline_ms,
+                    "registerBeforeDeadline": {
+                        "name": "early-tn",
+                        "wallMs": sim.wall_ms,
+                        "refused": err,
+                        "rule": "gap.register requires now >= migration.deadlineMs; build nothing before it",
+                    },
+                    "import": "gap.import(name, owner, periodStart, expiresAt, index, proof, bySponsor, authSig, namePrefix, nameSuffix); \
+                               outputs as register, the name with the snapshot owner and dates, price 0; lockTime 0, sequences 0; \
+                               authSig (SIGHASH_ALL) by the owner, or by migration.sponsor when bySponsor",
+                    "snapshot": v5.snapshot_json,
+                });
+                sim.advance_ms(wall - sim.wall_ms);
+            }
             continue;
         }
         let args = match &step {
@@ -136,6 +210,7 @@ fn main() -> Result<()> {
 
     // ---- edge cases on the same registry ---------------------------------
     let templates = Templates::load(&paths.root);
+    let _ = &live_paths;
     let extra = extra_cases(&templates, registry_id, wall, &tags)?;
     steps.extend(extra);
 
@@ -153,7 +228,13 @@ fn main() -> Result<()> {
         "commitValue": ops::COMMIT_VALUE,
         "maxInputsFeeEntry": ops::MAX_IO_FEE_ENTRY,
         "maxInputs": ops::MAX_INPUTS,
-        "registry": "v4: fixed register and renew tables baked into KachatGap and KachatName (no price record), periodMs, offers bound to the seller (108 B state), decline",
+        "registry": if version >= 5 {
+            "v5: v4 (fixed tables, periodMs, seller-bound offers, decline) plus gap.import from a migration snapshot and register closed until migration.deadlineMs; the gap is contracts/v5/KachatGap.sil, the name and offer are v4's"
+        } else {
+            "v4: fixed register and renew tables baked into KachatGap and KachatName (no price record), periodMs, offers bound to the seller (108 B state), decline"
+        },
+        "registryVersion": version,
+        "migrationRules": migration_rules,
         "registryCovenantId": hex(&registry_id.as_bytes()),
         "maxYears": templates_params.max_years,
         "periodMs": templates_params.period_ms,
@@ -181,7 +262,7 @@ fn main() -> Result<()> {
             "reclaim": "lockTime = expiresAt + graceMs; every input sequence 0",
             "refundOffer": "lockTime = refundAfter (DAA score); sequence 0",
         },
-        "recommendedBudgets": RECOMMENDED_BUDGETS.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<serde_json::Map<_, _>>(),
+        "recommendedBudgets": recommended_budgets().iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<serde_json::Map<_, _>>(),
         "deployer": {
             "xonly": hex(&xonly(&sim.deployer)),
             "address": p2pk_address(&xonly(&sim.deployer)).to_string(),
@@ -344,7 +425,9 @@ fn role(tx: &Transaction, i: usize, entry: &UtxoEntry, tags: &[(String, String)]
 
 fn dispatch_tags(kit: &kachat_names_harness::Kit) -> Vec<(String, String)> {
     let mut v = vec![];
-    for e in ["register", "merge", "absorbed"] {
+    let gap_entries: &[&str] =
+        if kit.params.registry_version >= 5 { &["register", "merge", "absorbed", "import"] } else { &["register", "merge", "absorbed"] };
+    for e in gap_entries {
         v.push((kit.gap.dispatch_tag(e), format!("gap.{e}")));
     }
     for e in ["transfer", "list", "buy", "extend", "renew", "release", "reclaim"] {
@@ -416,7 +499,7 @@ fn step_json(op: &str, before: &Snapshot, records: Value, args: Value, plan: &Pl
         let sigs: Vec<String> = pushes.iter().filter(|p| p.len() == 65 && p[64] == 0x01).map(|p| hex(p)).collect();
         let role = role(tx, i, &entries[i], kit_tags)?;
         let budget = input.compute_commit.compute_budget().ok_or_else(|| anyhow!("v1 input without a budget"))?;
-        let rec = RECOMMENDED_BUDGETS.iter().find(|(r, _)| *r == role).map(|(_, b)| *b).ok_or_else(|| anyhow!("no budget for {role}"))?;
+        let rec = recommended_budgets().iter().find(|(r, _)| *r == role).map(|(_, b)| *b).ok_or_else(|| anyhow!("no budget for {role}"))?;
         if budget > rec {
             bail!("{}: input {i} ({role}) measured budget {budget} > recommended {rec}", plan.op);
         }
@@ -940,5 +1023,107 @@ fn check(file: &std::path::Path) -> Result<()> {
         ok += 1;
     }
     println!("{ok}/{} port-built transactions valid", txs.len());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// registry v5: the vectors' own registry
+// ---------------------------------------------------------------------------
+
+struct V5Vectors {
+    root: PathBuf,
+    items: Vec<ops::SnapItem>,
+    deadline_ms: i64,
+    snapshot_json: Value,
+}
+
+/// A copy of the live params and contracts in a temporary directory, with a synthetic
+/// migration: a two-name snapshot (one owned by the vectors' deployer, imported by its
+/// owner; one owned by another key, imported by the sponsor), the deployer as sponsor and a
+/// deadline 30 minutes after `wall`. Its gap and name artifacts are written from the
+/// in-process compile, so the manifest builder and Templates accept them.
+fn v5_vector_repo(live: &Paths, wall: i64) -> Result<V5Vectors> {
+    use kachat_names_harness::snapshot::{Entry, Snapshot as Tree};
+    let root = std::env::temp_dir().join(format!("kachat-v5-vectors-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for d in ["contracts", "params"] {
+        copy_dir(&live.root.join(d), &root.join(d))?;
+    }
+    std::fs::copy(live.root.join(".gitignore"), root.join(".gitignore")).ok();
+    let deployer = keypair(77); // Sim's deployer
+    let other = keypair(78);
+    let day = 86_400_000;
+    let names = [("own-import", xonly(&deployer)), ("gift-import", xonly(&other))];
+    let tree = Tree::new(names.iter().map(|(n, o)| Entry { key: name_key(n.as_bytes()), owner: *o, period_start: wall - day, expires_at: wall + day }).collect());
+    let entries: Vec<Value> = tree
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let name = names.iter().find(|(n, _)| name_key(n.as_bytes()) == e.key).unwrap().0;
+            json!({ "index": i, "name": name, "key": hex(&e.key), "owner": hex(&e.owner),
+                    "ownerAddress": p2pk_address(&e.owner).to_string(),
+                    "periodStart": e.period_start, "expiresAt": e.expires_at, "proof": hex(&tree.proof(i)) })
+        })
+        .collect();
+    let snapshot_json = json!({
+        "kind": "kachat-names-snapshot", "version": 1, "network": "testnet-10",
+        "predecessorRegistryId": hex(&[0x5au8; 32]), "checkpoint": null, "atMs": wall,
+        "depth": kachat_names_harness::snapshot::DEPTH, "root": hex(&tree.root()), "entries": entries, "lapsed": [],
+    });
+    let deadline_ms = wall + 1_800_000;
+    std::fs::create_dir_all(root.join("manifests/snapshots"))?;
+    std::fs::write(root.join("manifests/snapshots/vectors.json"), serde_json::to_string_pretty(&snapshot_json)?)?;
+    let pp = root.join("params/testnet10.json");
+    let mut params: Value = serde_json::from_str(&std::fs::read_to_string(&pp)?)?;
+    params["registryVersion"] = json!(5);
+    params["registryCovenantId"] = Value::Null;
+    params["migration"] = json!({
+        "predecessorRegistryId": hex(&[0x5au8; 32]),
+        "snapshot": "manifests/snapshots/vectors.json",
+        "root": hex(&tree.root()),
+        "deadlineMs": deadline_ms,
+        "sponsor": hex(&xonly(&deployer)),
+    });
+    std::fs::write(&pp, serde_json::to_string_pretty(&params)?)?;
+    // artifacts: the gap and name of these params, from the in-process compile
+    let t = Templates::load(&root);
+    let name = kachat_names_harness::compile_name_in(&root, &t.params);
+    let gap = kachat_names_harness::compile_gap_in(&root, &t.params, &name);
+    let art = root.join("artifacts/testnet10");
+    std::fs::create_dir_all(&art)?;
+    let mut info = json!({ "network": "testnet-10", "registryVersion": 5, "migration": params["migration"], "contracts": {} });
+    for (c, tpl) in [("KachatName", &name), ("KachatGap", &gap)] {
+        std::fs::write(art.join(format!("{c}.json")), silverscript_abi::to_pretty_json(&tpl.abi).map_err(|e| anyhow!("{e}"))?)?;
+        let span = tpl.abi.contracts[&tpl.contract].compiled.state_span;
+        let tags: serde_json::Map<String, Value> =
+            tpl.abi.contracts[&tpl.contract].entries.iter().map(|(e, v)| (e.clone(), json!(v.dispatch_tag.to_hex()))).collect();
+        info["contracts"][c] = json!({
+            "bytecodeLen": tpl.bytecode.len(), "stateSpan": { "offset": span.offset, "len": span.len },
+            "prefixLen": tpl.prefix.len(), "suffixLen": tpl.suffix.len(), "templateHash": hex(&tpl.template_hash),
+            "dispatchTags": tags, "bytecodeSha256": hex(&sha2_256(&tpl.bytecode)),
+        });
+    }
+    std::fs::write(art.join("build-info.json"), serde_json::to_string_pretty(&info)?)?;
+    let items = ops::snapshot_items(&snapshot_json)?;
+    Ok(V5Vectors { root, items, deadline_ms, snapshot_json })
+}
+
+fn sha2_256(b: &[u8]) -> Vec<u8> {
+    use sha2::Digest;
+    sha2::Sha256::digest(b).to_vec()
+}
+
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for e in std::fs::read_dir(src)? {
+        let e = e?;
+        let to = dst.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            copy_dir(&e.path(), &to)?;
+        } else {
+            std::fs::copy(e.path(), to)?;
+        }
+    }
     Ok(())
 }
