@@ -1,12 +1,26 @@
 # Mainnet launch (2026-10-09)
 
-**Status: not deployed.** Mainnet launches **registry v4** (`contracts/KachatGap.sil`,
-`KachatName.sil`, `KachatOffer.sil` under `params/mainnet.json`). Registry v5
+**Status: LIVE since 2026-10-09 20:39 UTC ("`.kachat` mainnet v1").**
+- **Registry** `348bd2c81170f267a2a7039cbf3a6f275e80b189d6c956183ea73ff3ffde75a4`.
+- **Genesis** `a0281841bf77807a7780f13cc84c0a3e4cd8df3d076b7f052ffc9c898cca90ff`, funded by
+  `5fa3f07f…8a36:0`, deployer `kaspa:qqgcspk6s0t9q87a2rf28wjcpzse5sgvwnsu8jpvr9rmqt2zcf6avdu9xs0he`.
+- **Templates:** gap `d70afe60…` (4,216 B), name `259e0250…` (3,406 B), offer `7e7f2461…`
+  (1,117 B). Manifest: `manifests/kachat-names-mainnet.json`.
+
+It runs the **registry v4 contracts** (`contracts/KachatGap.sil`, `KachatName.sil`,
+`KachatOffer.sil` under `params/mainnet.json`). Users see it as "mainnet v1". The manifest's
+`registryVersion` stays `4`, because the apps and the indexer decode by it. Registry v5
 (`docs/REGISTRY_V5.md`) is the escape route: if mainnet ever needs a fix or new prices, a v5
 registry imports a snapshot of v4, and every name keeps its owner and paid period.
 
-Nothing here runs without the owner. The genesis is a dry run first, then the owner's explicit
-"send it" for mainnet, after the external audit.
+**The owner's launch plan (2026-10-09):**
+1. The owner registers 2 names from a personal iPhone build and tests.
+2. An app update shows a **1-week countdown**, in which no app searches or registers names.
+3. Then it's public.
+
+There's **no on-chain lock**: the registry is open from the genesis, so the countdown gates the
+official apps only (the owner's choice). The **external audit** follows the launch (the owner
+waived it as a launch gate).
 
 ## 1. Before the genesis
 
@@ -14,12 +28,12 @@ Nothing here runs without the owner. The genesis is a dry run first, then the ow
 |---|---|---|---|
 | 1 | Pre-mainnet audit (2026-10-09): C2 fixed in the contracts, T1-T3 tests and mutations added, CLI mainnet mode (R1), manifest written before the acceptance wait (R2) | this repo | done |
 | 2 | **Testnet runs the final code.** Migrated 2026-10-09 from `fdc403f5…` to `1283f749…bfa2` (all 6 names, same owners and dates). The apps run on it, an app `release` (k) went through, and the testnet indexer is proven against the chain (`verify --live --indexer`) | done |
-| 3 | **External audit** of the three contracts at the launch commit | owner | to do |
+| 3 | **External audit** of the three contracts at the launch commit | owner | after launch (waived as a gate) |
 | 4 | **Docker image built** from the launch commit, and `verify` passing in it | owner / KQS | to do |
 | 5 | Mainnet params final: prices, `offerMaxFee` 0.1 KAS, `registryCovenantId: null` | owner | done |
 | 6 | App release ready: mainnet template pins and the manifest, the launch-day retry (C3), the offer guards (C1) | iOS / Android / Desktop | to do |
 | 7 | Mainnet indexer follower ready, and KQS publishing `kachat-names-mainnet.json` (`docs/KQS.md` section 5) | indexer / KQS | to do |
-| 8 | The owner's explicit go-ahead | owner | - |
+| 8 | The owner's explicit go-ahead | owner | done: genesis 2026-10-09 |
 
 **Checks at the launch commit** (all must pass):
 

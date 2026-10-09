@@ -16,8 +16,10 @@ import). Mainnet launch: [docs/MAINNET.md](docs/MAINNET.md).
   deployed 2026-10-09 by migrating every name of the previous v5 registry `fdc403f5…571d` (built
   before the audit's C2 fix and the 0.1 KAS offer fee cap). It runs on a **day clock**: mainnet's
   year scaled to 24 hours.
-- **Mainnet is not deployed.** It launches **v4** (`docs/MAINNET.md`), after the external audit
-  and the owner's go-ahead.
+- **Mainnet is LIVE** since 2026-10-09 20:39 UTC ("mainnet v1"): registry v4, registry
+  `348bd2c81170f267a2a7039cbf3a6f275e80b189d6c956183ea73ff3ffde75a4`, genesis `a0281841…90ff`,
+  manifest `manifests/kachat-names-mainnet.json`. The launch plan and the runbook are in
+  `docs/MAINNET.md`.
 - **Earlier testnet registries** are archived in `manifests/` (see
   [Registry history](#registry-history)). Names carried over only into v5.
 
