@@ -38,8 +38,8 @@ docker build -t kaspa-one-click/kachat-domains:main \
 
 | Command | What it does | Writes |
 |---|---|---|
-| `publish` (mount a dir at `/names`) | Runs `verify`. If it passes, it copies `manifests/kachat-names-testnet-10.json` into `/names/` and writes `/names/kachat-domains.json` (the verify summary). Writes are atomic (temp file + rename). | Only on success; exit 1 and nothing written otherwise |
-| `verify` (`--json` for machines) | Recompiles the name, gap and offer from `contracts/*.sil` + `params/testnet10.json` with the pinned silverscript library. It then requires the committed artifacts, the manifest's templates, its genesis binding (registry id = covenant id of the genesis outpoint and gap) and every manifest param to match. Offline: no node, no key. | Nothing |
+| `publish` (mount a dir at `/names`) | For each network with a deployed manifest (testnet-10, and mainnet once it exists): runs `verify`; if it passes, copies `manifests/kachat-names-<network>.json` into `/names/` and writes `/names/kachat-domains-<network>.json` (its verify summary). The testnet-10 summary is also written as `/names/kachat-domains.json`, as before. Writes are atomic (temp file + rename). | Per network, only on success; exit 1 if any network failed |
+| `verify` (`--json` for machines; `--network mainnet` for mainnet) | Recompiles the name, gap and offer from `contracts/*.sil` + `params/<network>.json` with the pinned silverscript library. It then requires the committed artifacts, the manifest's templates, its genesis binding (registry id = covenant id of the genesis outpoint and gap) and every manifest param to match. Offline: no node, no key. | Nothing |
 | `verify --live --indexer <url> --node grpc://<host>:16210` | Also **proves the indexer's name list is exactly the registry on chain**. It reads `/names/all`, works out every gap and name address from it, and requires each to hold a registry UTXO of the right value (section 2.1). Needs a node with `--utxoindex`. | Nothing |
 | `version` | The commit the image was built from | Nothing |
 | anything else | Passed to `kachat-names`, e.g. `prices`, `status --node grpc://kaspad-testnet:16210` | See the CLI |
@@ -118,14 +118,12 @@ An app entry next to `bot`, using the patterns the panel already has:
     registry id.
 - **Retire** the bundled manifest and "Use the testnet-10 manifest" once this works. Keep "Use a
   manifest file" for operators who pin their own.
-- **Network switch.** Today `publish` handles testnet-10 only, because there's no mainnet
-  registry. When mainnet launches, `publish` will also write `kachat-names-mainnet.json`, and
-  `kachat-domains.json` will list both networks. The KQS side should key on `network`.
+- **Network switch.** See section 5: `publish` already handles both networks.
 
 ## 4. Owner tools (later, testnet only)
 
-The CLI in the image is testnet-10 only (`net.rs`: "There is no mainnet mode"). It can run a
-registry from a server:
+The CLI has a mainnet mode since 2026-10-09 (`--network mainnet`), but the panel should offer
+these on testnet only. It can run a registry from a server:
 - `keygen`, `address` and `balance`;
 - `genesis` (a dry run unless `--submit`), `status` and `scan`.
 
@@ -139,3 +137,31 @@ Not now, for two reasons:
   manifest, so a new deployment goes live only when its manifest is committed here and the app is
   updated. So the panel would save only the command-line step. Its other operators would only be
   spending their own TKAS on registries nobody reads, which is harmless but pointless.
+
+## 5. Mainnet (2026-10-09)
+
+**For:** the KQS session. **From:** the kachat-domains session. Nothing changes for KQS until the
+mainnet genesis (`docs/MAINNET.md`). When it lands, `manifests/kachat-names-mainnet.json` appears in
+this repo, and the next **Update** publishes it.
+
+**What `publish` does now** (`docker/entrypoint.sh`):
+- **testnet-10:** as before. `kachat-names-testnet-10.json` and `kachat-domains.json` are written,
+  plus the new `kachat-domains-testnet-10.json` (the same summary).
+- **mainnet**, once its manifest exists: `kachat-names-mainnet.json` and
+  `kachat-domains-mainnet.json`.
+- **Each network is verified on its own.** A network that fails `verify` gets nothing written, the
+  other is still published, and `publish` exits 1.
+
+**What KQS needs:**
+1. **A mainnet manifest for the mainnet indexer**, the counterpart of `applyNamesManifest` /
+   `KACHAT_NAMES_MANIFEST_TESTNET`. For example, `KACHAT_NAMES_MANIFEST_MAINNET` pointing at
+   `conf/names/kachat-names-mainnet.json`, applied only when that file exists.
+2. **Gate on the mainnet indexer being installed**, as the testnet manifest is gated on
+   `kachat-testnet`.
+3. **Restart rule per network:** restart an indexer only when its own network's `registryCovenantId`
+   or `manifestSha256` changed (`kachat-domains-<network>.json`).
+4. **Status card:** one block per network, keyed on `network`. Before the mainnet genesis there's
+   no `kachat-domains-mainnet.json`; show "mainnet: not deployed".
+5. **Owner tools stay testnet-only** in the panel. The mainnet genesis is run by hand
+   (`docs/MAINNET.md`), never from the panel.
+
