@@ -338,7 +338,14 @@ impl Kit {
 
     fn build_kit(params_file: &str, v5: Option<Migration>) -> Self {
         let root = repo_root();
-        let params = NetParams::load_in(&root, params_file);
+        let mut params = NetParams::load_in(&root, params_file);
+        // KACHAT_GAP=v4 runs the suite on the v4 gap (contracts/KachatGap.sil, what mainnet
+        // launches with) under the same params, so both gaps get every transaction test
+        // (scripts/mutation-check.sh runs the v4 gap's mutations this way).
+        if v5.is_none() && std::env::var("KACHAT_GAP").as_deref() == Ok("v4") {
+            params.registry_version = 4;
+            params.migration = None;
+        }
         let deployer = keypair(200);
 
         // Registry v4: the prices are baked, so the name and gap compile first.
