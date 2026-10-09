@@ -67,9 +67,9 @@ enum Cmd {
     /// Show the two price tables baked into the gap and the name (read-only, no node needed)
     Prices,
     /// The migration snapshot of the live registry: every name active or in grace at
-    /// `--at` (default now), as the tree registry v5's `import` checks. Run `scan` and
-    /// `verify --live` first: the snapshot is only as good as the scanned state. Writes
-    /// manifests/snapshots/<registry>-<atMs>.json (offline, no key)
+    /// `--at` (default now), as the tree registry v5's `import` checks. Run `scan` first;
+    /// it then proves the scanned state against a node (as `verify --live`) and refuses a
+    /// stale one, so no name can be missed. Writes manifests/snapshots/<registry>-<atMs>.json
     Snapshot {
         /// snapshot time, unix ms (default: now)
         #[arg(long)]
@@ -228,6 +228,12 @@ async fn run(cli: Cli, paths: Paths) -> Result<()> {
             }
             let reg = Registry::load(&paths.state())?
                 .ok_or_else(|| anyhow!("{} not found: run `scan` first", paths.rel(&paths.state())))?;
+            // A snapshot of a stale state would silently leave names out: prove the state is
+            // exactly the registry on chain first, against a node.
+            let proof = verify_live(&cli, &paths, None)
+                .await
+                .map_err(|e| anyhow!("the scanned state is not the registry on chain ({e}); run `scan` and try again"))?;
+            println!("state proven against {}: {} names, {} gaps", proof["node"].as_str().unwrap_or(""), proof["names"], proof["gaps"]);
             let grace = Templates::load(&paths.root).params.grace_ms;
             let at_ms = at.unwrap_or_else(now_ms);
             let taken = kachat_names_cli::snapshot::take(&reg, at_ms, grace);
