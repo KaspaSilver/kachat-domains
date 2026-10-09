@@ -617,7 +617,7 @@ async fn command(l: &Live, cmd: &Cmd) -> Result<()> {
             if *from_genesis {
                 reg = d.genesis_registry(kit.params.gap_value);
             }
-            let rep = scan::scan(&l.node, &kit, &mut reg, *min_confirmations, 10_000, true).await?;
+            let rep = scan_saving(l, &kit, &mut reg, *min_confirmations, true).await?;
             reg.check_invariants()?;
             reg.save(&l.paths.state())?;
             for w in &rep.warnings {
@@ -955,11 +955,36 @@ fn demo_build(paths: &Paths, kit: &Kit, params: &std::path::Path) -> Result<()> 
     Ok(())
 }
 
+/// `scan` one page at a time, saving the state after each, so a slow or flaky node
+/// that fails part way leaves the progress made (the next run continues from it).
+async fn scan_saving(l: &Live, kit: &Kit, reg: &mut Registry, min_confirmations: u64, verbose: bool) -> Result<scan::ScanReport> {
+    let mut total = scan::ScanReport { blocks: 0, txs: 0, pages: 0, reached_tip: false, events: vec![], warnings: vec![] };
+    for _ in 0..10_000 {
+        let rep = scan::scan(&l.node, kit, reg, min_confirmations, 1, verbose).await?;
+        reg.save(&l.paths.state())?;
+        total.blocks += rep.blocks;
+        total.txs += rep.txs;
+        total.pages += rep.pages;
+        total.events.extend(rep.events);
+        total.warnings.extend(rep.warnings.into_iter().filter(|w| !w.starts_with("stopped after")));
+        if rep.reached_tip {
+            total.reached_tip = true;
+            break;
+        }
+        if verbose {
+            eprintln!("  page {}: {} chain blocks so far, checkpoint {}", total.pages, total.blocks, reg.scan_from.map(|h| h.to_string()).unwrap_or_default());
+        }
+    }
+    if !total.reached_tip {
+        total.warnings.push(format!("stopped after {} page(s) before the confirmed tip; run `scan` again", total.pages));
+    }
+    Ok(total)
+}
+
 async fn status(l: &Live, do_scan: bool) -> Result<()> {
     let (d, kit, mut reg) = l.registry()?;
     if do_scan {
-        let rep = scan::scan(&l.node, &kit, &mut reg, 20, 10_000, l.verbose).await?;
-        reg.save(&l.paths.state())?;
+        let rep = scan_saving(l, &kit, &mut reg, 20, l.verbose).await?;
         for w in &rep.warnings {
             println!("warning: {w}");
         }

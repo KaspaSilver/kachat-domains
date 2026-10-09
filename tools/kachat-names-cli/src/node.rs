@@ -1,5 +1,6 @@
-//! Read-only node access over gRPC (rusty-kaspa `kaspa-grpc-client`), plus the
-//! one write path, [`Node::submit`], which the CLI calls only with `--submit`.
+//! Read-only node access over gRPC (rusty-kaspa `kaspa-grpc-client`) or wRPC
+//! Borsh (`kaspa-wrpc-client`, for `--node ws://…` / `wss://…`), plus the one
+//! write path, [`Node::submit`], which the CLI calls only with `--submit`.
 //!
 //! Every connection is checked before use: the node must report network
 //! the selected network (`--network`), be synced and keep a UTXO index.
@@ -13,6 +14,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use kaspa_addresses::Address;
 use kaspa_consensus_core::tx::{Transaction, TransactionOutpoint, UtxoEntry};
 use kaspa_grpc_client::GrpcClient;
+use kaspa_wrpc_client::{KaspaRpcClient, WrpcEncoding, client::ConnectOptions, prelude::ConnectStrategy};
 use kaspa_hashes::Hash;
 use kaspa_rpc_core::{
     GetVirtualChainFromBlockV2Response, RpcDataVerbosityLevel, RpcTransaction, api::rpc::RpcApi, notify::mode::NotificationMode,
@@ -37,7 +39,33 @@ pub struct DagPoint {
 
 pub struct Node {
     pub url: String,
-    client: GrpcClient,
+    client: Client,
+}
+
+/// The two transports; both implement rusty-kaspa's `RpcApi`.
+enum Client {
+    Grpc(GrpcClient),
+    Wrpc(KaspaRpcClient),
+}
+
+impl Client {
+    fn api(&self) -> &dyn RpcApi {
+        match self {
+            Client::Grpc(c) => c,
+            Client::Wrpc(c) => c,
+        }
+    }
+
+    async fn disconnect(&self) {
+        match self {
+            Client::Grpc(c) => {
+                let _ = c.disconnect().await;
+            }
+            Client::Wrpc(c) => {
+                let _ = c.disconnect().await;
+            }
+        }
+    }
 }
 
 const REQUEST_TIMEOUT_MS: u64 = 20_000;
@@ -60,7 +88,24 @@ impl Node {
         .await
         .map_err(|_| anyhow!("timed out connecting to {url}"))?
         .map_err(|e| anyhow!("connecting to {url}: {e}"))?;
-        Ok(Node { url: url.to_string(), client })
+        Ok(Node { url: url.to_string(), client: Client::Grpc(client) })
+    }
+
+    /// wRPC Borsh (`ws://` / `wss://`), e.g. a public node.
+    async fn connect_wrpc(url: &str) -> Result<Node> {
+        let client = KaspaRpcClient::new(WrpcEncoding::Borsh, Some(url), None, None, None).map_err(|e| anyhow!("{url}: {e}"))?;
+        let options = ConnectOptions {
+            block_async_connect: true,
+            strategy: ConnectStrategy::Fallback,
+            url: Some(url.to_string()),
+            connect_timeout: Some(Duration::from_secs(10)),
+            ..Default::default()
+        };
+        tokio::time::timeout(Duration::from_secs(15), client.connect(Some(options)))
+            .await
+            .map_err(|_| anyhow!("timed out connecting to {url}"))?
+            .map_err(|e| anyhow!("connecting to {url}: {e}"))?;
+        Ok(Node { url: url.to_string(), client: Client::Wrpc(client) })
     }
 
     /// Connect to `--node grpc://host:port`, or discover a node through the
@@ -68,8 +113,12 @@ impl Node {
     /// the network, is synced and has a UTXO index.
     pub async fn connect(explicit: Option<&str>, verbose: bool) -> Result<Node> {
         if let Some(url) = explicit {
-            let url = if url.starts_with("grpc://") { url.to_string() } else { format!("grpc://{url}") };
-            let node = Self::connect_url(&url).await?;
+            let node = if url.starts_with("ws://") || url.starts_with("wss://") {
+                Self::connect_wrpc(url).await?
+            } else {
+                let url = if url.starts_with("grpc://") { url.to_string() } else { format!("grpc://{url}") };
+                Self::connect_url(&url).await?
+            };
             node.check_network().await?;
             return Ok(node);
         }
@@ -95,7 +144,7 @@ impl Node {
                             eprintln!("    rejected: {e}");
                         }
                         last_err = Some(e);
-                        let _ = node.client.disconnect().await;
+                        node.client.disconnect().await;
                     }
                 },
                 Err(e) => last_err = Some(e),
@@ -112,7 +161,12 @@ impl Node {
             bail!("{} reports network {:?}; this run is on {}", self.url, point.network, net().name);
         }
         if !point.is_synced {
-            bail!("{} is not synced", self.url);
+            bail!(
+                "{} is not synced (it reports isSynced false at virtual DAA {}, median time {})",
+                self.url,
+                point.virtual_daa,
+                crate::util::fmt_ms(point.past_median_time as i64)
+            );
         }
         if !point.has_utxo_index {
             bail!("{} has no UTXO index (--utxoindex)", self.url);
@@ -121,12 +175,12 @@ impl Node {
     }
 
     pub async fn dag_point(&self) -> Result<DagPoint> {
-        let info = self.client.get_server_info().await.context("GetServerInfo")?;
-        let dag = self.client.get_block_dag_info().await.context("GetBlockDagInfo")?;
+        let info = self.client.api().get_server_info().await.context("GetServerInfo")?;
+        let dag = self.client.api().get_block_dag_info().await.context("GetBlockDagInfo")?;
         if info.network_id.to_string() != dag.network.to_string() {
             bail!("node reports two networks: {} / {}", info.network_id, dag.network);
         }
-        let feerate = match self.client.get_fee_estimate().await {
+        let feerate = match self.client.api().get_fee_estimate().await {
             Ok(e) => e.normal_buckets.first().map(|b| b.feerate).unwrap_or(e.priority_bucket.feerate),
             Err(_) => 1.0,
         };
@@ -144,7 +198,7 @@ impl Node {
 
     /// GetInfo (read-only), for the connectivity report.
     pub async fn info(&self) -> Result<kaspa_rpc_core::GetInfoResponse> {
-        self.client.get_info().await.context("GetInfo")
+        self.client.api().get_info().await.context("GetInfo")
     }
 
     /// UTXOs of the given addresses: (address, outpoint, entry incl. covenant id).
@@ -154,7 +208,7 @@ impl Node {
         }
         let mut out = Vec::new();
         for chunk in addresses.chunks(100) {
-            let entries = self.client.get_utxos_by_addresses(chunk.to_vec()).await.context("GetUtxosByAddresses")?;
+            let entries = self.client.api().get_utxos_by_addresses(chunk.to_vec()).await.context("GetUtxosByAddresses")?;
             for e in entries {
                 let addr = e.address.ok_or_else(|| anyhow!("UTXO entry without address"))?;
                 let u = e.utxo_entry;
@@ -170,6 +224,7 @@ impl Node {
 
     pub async fn virtual_chain_v2(&self, start: Hash, min_confirmations: u64) -> Result<GetVirtualChainFromBlockV2Response> {
         self.client
+            .api()
             .get_virtual_chain_from_block_v2(start, Some(RpcDataVerbosityLevel::High), Some(min_confirmations))
             .await
             .context("GetVirtualChainFromBlockV2")
@@ -181,11 +236,11 @@ impl Node {
     pub async fn submit(&self, tx: &Transaction) -> Result<Hash> {
         self.check_network().await?;
         let rpc: RpcTransaction = tx.into();
-        self.client.submit_transaction(rpc, false).await.context("SubmitTransaction")
+        self.client.api().submit_transaction(rpc, false).await.context("SubmitTransaction")
     }
 
     pub async fn disconnect(self) {
-        let _ = self.client.disconnect().await;
+        self.client.disconnect().await;
     }
 }
 
