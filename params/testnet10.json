@@ -1,6 +1,6 @@
 {
   "network": "testnet-10",
-  "registryVersion": 4,
+  "registryVersion": 5,
   "compiler": {
     "repo": "https://github.com/kaspanet/silverscript",
     "tag": "v1.0.0",
@@ -34,5 +34,12 @@
     "lo": "0000000000000000000000000000000000000000000000000000000000000000",
     "hi": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
   },
-  "registryCovenantId": "e6b7244831004e1db928458bce570347317b50ff124c010d342d73a6c2017f0d"
+  "registryCovenantId": "fdc403f5ef76ea7c71dcb5305d09daf7ab7fd68dc1d274a314fc8ca9111e571d",
+  "migration": {
+    "predecessorRegistryId": "e6b7244831004e1db928458bce570347317b50ff124c010d342d73a6c2017f0d",
+    "snapshot": "manifests/snapshots/e6b7244831004e1d-1791520240387.json",
+    "root": "0642b3e0f49bae3183dfa2233758ffc8fb53de7fbbfe97f9c4aa185cfb0dd800",
+    "deadlineMs": 1791541849055,
+    "sponsor": "a866cf597e3e681324adbc115ec34ca7746813cf70f6bfe4f9c36f2c9dd30848"
+  }
 }

@@ -1,6 +1,6 @@
 {
   "network": "testnet-10",
-  "registryVersion": 4,
+  "registryVersion": 5,
   "compiler": {
     "repo": "https://github.com/kaspanet/silverscript",
     "tag": "v1.0.0",
@@ -36,7 +36,7 @@
       "hi": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
     }
   },
-  "registryCovenantId": "e6b7244831004e1db928458bce570347317b50ff124c010d342d73a6c2017f0d",
+  "registryCovenantId": "fdc403f5ef76ea7c71dcb5305d09daf7ab7fd68dc1d274a314fc8ca9111e571d",
   "contracts": {
     "KachatName": {
       "bytecodeLen": 3094,
@@ -59,20 +59,21 @@
       "bytecodeSha256": "d258edaa485dc351bca252fecd94c58be3087c490fae645eff24651388250ecb"
     },
     "KachatGap": {
-      "bytecodeLen": 4058,
+      "bytecodeLen": 7747,
       "stateSpan": {
         "offset": 1,
         "len": 66
       },
       "prefixLen": 1,
-      "suffixLen": 3991,
-      "templateHash": "9f057f406361583eb2b94956825f86a2d8cc47d3c8800f05855a3e75b39d8bf5",
+      "suffixLen": 7680,
+      "templateHash": "afce97e05a6341ea7768252a264c65882b92105f8d7158a3ac63f68fbe1615cb",
       "dispatchTags": {
         "absorbed": "dab76355",
+        "import": "aa4cc365",
         "merge": "63d25bc2",
         "register": "8667af5e"
       },
-      "bytecodeSha256": "091cca51ec4ced5aa3c8444ae79cabbe661c41147791d00432aa82d5bdbb7aef"
+      "bytecodeSha256": "61aa2e39ce1bfea58f36358d187d6fa32a0bc6f9c681dee8904d4a5b58315768"
     },
     "KachatOffer": {
       "bytecodeLen": 1114,
@@ -82,14 +83,21 @@
       },
       "prefixLen": 1,
       "suffixLen": 1005,
-      "templateHash": "5a7e22af319bac406769563b6b4b39b05c3aac145375ccaaada4095960372a7a",
+      "templateHash": "9d6e666481ea80e27565e68c01e6de51b32660d2f91368d9b80e4ee00b981d6d",
       "dispatchTags": {
         "accept": "2e18ed39",
         "decline": "aead5037",
         "refund": "777f5b11",
         "withdraw": "80344ff1"
       },
-      "bytecodeSha256": "52051ffe56d02e564141ca6b95b9bee7ea8ab5a7b3823cb5e7dbe3efbe4cf9c9"
+      "bytecodeSha256": "101aec4b9781e8afdaaf8f82d04da09586360e1211e05b713a8243a8ff3624d2"
     }
+  },
+  "migration": {
+    "predecessorRegistryId": "e6b7244831004e1db928458bce570347317b50ff124c010d342d73a6c2017f0d",
+    "snapshot": "manifests/snapshots/e6b7244831004e1d-1791520240387.json",
+    "root": "0642b3e0f49bae3183dfa2233758ffc8fb53de7fbbfe97f9c4aa185cfb0dd800",
+    "deadlineMs": 1791541849055,
+    "sponsor": "a866cf597e3e681324adbc115ec34ca7746813cf70f6bfe4f9c36f2c9dd30848"
   }
 }
