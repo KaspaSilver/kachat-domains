@@ -13,7 +13,7 @@ Nothing here runs without the owner. The genesis is a dry run first, then the ow
 | # | Gate | Who | State |
 |---|---|---|---|
 | 1 | Pre-mainnet audit (2026-10-09): C2 fixed in the contracts, T1-T3 tests and mutations added, CLI mainnet mode (R1), manifest written before the acceptance wait (R2) | this repo | done |
-| 2 | **Testnet runs the final code.** Migrated 2026-10-09 from `fdc403f5…` to `1283f749…bfa2` (all 6 names, same owners and dates). Still to do: the app and the indexer checked against it | this repo: done; apps + indexer: to do |
+| 2 | **Testnet runs the final code.** Migrated 2026-10-09 from `fdc403f5…` to `1283f749…bfa2` (all 6 names, same owners and dates). The apps run on it, an app `release` (k) went through, and the testnet indexer is proven against the chain (`verify --live --indexer`) | done |
 | 3 | **External audit** of the three contracts at the launch commit | owner | to do |
 | 4 | **Docker image built** from the launch commit, and `verify` passing in it | owner / KQS | to do |
 | 5 | Mainnet params final: prices, `offerMaxFee` 0.1 KAS, `registryCovenantId: null` | owner | done |
