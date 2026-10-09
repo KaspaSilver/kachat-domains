@@ -288,6 +288,25 @@ impl Registry {
                     ));
                     predicted.push((*i as u16, Predicted::Name(f)));
                 }
+                // registry v5: a snapshot name re-created with its snapshot owner and
+                // paid period, unlisted (the proof and signature were checked by the script)
+                "import" => {
+                    let name = sp.args.first().ok_or_else(|| anyhow!("import without a name"))?.clone();
+                    let owner = arg32(&sp.args, 1)?;
+                    let period_start = arg_int(&sp.args, 2)?;
+                    let expires_at = arg_int(&sp.args, 3)?;
+                    let key = name_key(&name);
+                    let f = NameFields::new(&name, &owner, 0, period_start, expires_at);
+                    predicted.push((*i as u16, Predicted::Gap { lo: g.lo, hi: key }));
+                    predicted.push((*i as u16, Predicted::Gap { lo: key, hi: g.hi }));
+                    events.push(format!(
+                        "import {} for {} until {} (from the snapshot)",
+                        String::from_utf8_lossy(&name),
+                        p2pk_address(&owner),
+                        fmt_ms(f.expires_at)
+                    ));
+                    predicted.push((*i as u16, Predicted::Name(f)));
+                }
                 "merge" => {
                     let succ = gap_ins
                         .iter()
@@ -483,8 +502,9 @@ impl Registry {
                 name: o["name"].as_str().map(str::to_string),
             });
         }
-        if v["registryVersion"].as_i64() != Some(4) {
-            bail!("state: not a registry v4 state file (archive it and run `scan --from-genesis`)");
+        // the state format is the same for v4 and v5 (v5 only adds the `import` entry)
+        if !matches!(v["registryVersion"].as_i64(), Some(4) | Some(5)) {
+            bail!("state: not a registry v4/v5 state file (archive it and run `scan --from-genesis`)");
         }
         let applied = arr("applied")
             .iter()

@@ -55,7 +55,8 @@ pub fn build(paths: &Paths, kit: &Kit, plan: &Plan, deployer: &str, scan_from: O
     ensure!(tx.outputs.iter().filter(|o| o.covenant.is_some()).count() == 1, "genesis authorizes one output only");
     let params: Value = serde_json::from_str(&std::fs::read_to_string(paths.params())?)?;
     let info: Value = serde_json::from_str(&std::fs::read_to_string(paths.artifacts().join("build-info.json"))?)?;
-    ensure!(info["registryVersion"].as_i64() == Some(4), "{}: not a registry v4 build (run ./scripts/build.sh)", paths.rel(&paths.artifacts()));
+    let version = kit.params.registry_version as i64;
+    ensure!(info["registryVersion"].as_i64() == Some(version), "{}: not a registry v{version} build (run ./scripts/build.sh)", paths.rel(&paths.artifacts()));
     let mut artifacts = serde_json::Map::new();
     // the name and the gap bake only params (both price tables included): the
     // committed artifacts, described by build-info.json
@@ -103,9 +104,24 @@ pub fn build(paths: &Paths, kit: &Kit, plan: &Plan, deployer: &str, scan_from: O
         m.remove("compiler");
         m.remove("network");
     }
+    // registry v5: the snapshot the gap bakes, by file and hash (anyone can rebuild it:
+    // `kachat-names snapshot --check <file>`)
+    let snapshot = match params.get("migration").filter(|m| !m.is_null()) {
+        Some(m) => match m["snapshot"].as_str() {
+            Some(f) => {
+                let path = paths.root.join(f);
+                let file: Value = serde_json::from_str(&std::fs::read_to_string(&path).with_context(|| f.to_string())?)?;
+                ensure!(file["root"] == m["root"], "{f}: its root is not migration.root");
+                json!({ "file": f, "sha256": sha256_file(&path)?, "predecessorRegistryId": file["predecessorRegistryId"], "atMs": file["atMs"], "names": file["entries"].as_array().map(|e| e.len()) })
+            }
+            None => Value::Null,
+        },
+        None => Value::Null,
+    };
     Ok(json!({
         "name": "kachat-names",
-        "registryVersion": 4,
+        "registryVersion": version,
+        "snapshot": snapshot,
         "network": NETWORK,
         "status": if dry_run { "dry run: NOT broadcast, the registry does not exist" } else { "deployed" },
         "compiler": params["compiler"],
@@ -145,11 +161,20 @@ pub fn load(path: &Path, kit_check: Option<&Kit>) -> Result<Deployed> {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(path).with_context(|| format!("{}: no manifest", path.display()))?)?;
     ensure!(v["network"] == NETWORK, "{}: manifest is for {}", path.display(), v["network"]);
     ensure!(
-        v["registryVersion"].as_i64() == Some(4),
-        "{}: not a registry v4 manifest (registry v{} is run from its own branch; a v4 registry needs its own genesis: archive the old manifest first)",
+        matches!(v["registryVersion"].as_i64(), Some(4) | Some(5)),
+        "{}: not a registry v4 or v5 manifest (registry v{}; a new version needs its own genesis: archive the old manifest first)",
         path.display(),
         v["registryVersion"]
     );
+    if let Some(kit) = kit_check {
+        ensure!(
+            v["registryVersion"].as_i64() == Some(kit.params.registry_version as i64),
+            "{}: a registry v{} manifest, but params build v{}",
+            path.display(),
+            v["registryVersion"],
+            kit.params.registry_version
+        );
+    }
     let s = |p: &Value| p.as_str().map(str::to_string).ok_or_else(|| anyhow!("manifest field missing"));
     let registry_id = Hash::from_bytes(unhex32(&s(&v["registryCovenantId"])?)?);
     let g = &v["genesis"];

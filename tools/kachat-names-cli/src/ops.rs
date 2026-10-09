@@ -12,7 +12,7 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow, bail, ensure};
 use kachat_names_harness::{
-    Arg, Block, Built, Costs, Input, Kit, NameFields, NetParams, OfferFields, Template, TransactionOutput, TxSpec, Unlock, Utxo, bytes,
+    Arg, ArtifactValue, Block, Built, Costs, Input, Kit, NameFields, NetParams, OfferFields, Template, TransactionOutput, TxSpec, Unlock, Utxo, bytes,
     commit_redeem, commitment, compile_gap_in, compile_name_in, compile_offer_in, gap_state, genesis_spec, int, name_key, p2pk_spk, xonly,
 };
 use kaspa_consensus_core::{
@@ -1027,4 +1027,97 @@ pub fn reclaim(env: &Env, x: ExitParts) -> Result<Plan> {
         notes,
     };
     finish(env, &[], d, name_payload("reclaim", &name), Fee::FromOutput { idx: 2, cap: None, floor: MIN_CHANGE })
+}
+
+// ---------------------------------------------------------------------------
+// registry v5: import from the migration snapshot
+// ---------------------------------------------------------------------------
+
+/// One name of a checked snapshot file (`snapshot::check_file`), ready to import.
+pub struct SnapItem {
+    pub name: String,
+    pub entry: kachat_names_harness::snapshot::Entry,
+    pub index: usize,
+    pub proof: Vec<u8>,
+}
+
+/// [gap.import, funding..] -> [gap (lo, key), gap (key, hi), name, change]: the
+/// snapshot name with its snapshot owner and paid period, unlisted. The
+/// deployer signs as the sponsor (or as the owner, for its own names); there
+/// is no price, only the network fee, and no time lock.
+pub fn import(env: &Env, wallet: &[Utxo], gap: &GapRec, gap_utxo: &Utxo, item: &SnapItem) -> Result<Plan> {
+    let p = &env.kit.params;
+    ensure!(p.registry_version >= 5, "import needs a registry v5 (params registryVersion 5)");
+    let m = p.migration.ok_or_else(|| anyhow!("params carry no migration"))?;
+    let name = item.name.as_str();
+    check_name(name)?;
+    let key = name_key(name.as_bytes());
+    ensure!(key == item.entry.key, "{name}: the snapshot key is not blake3(name)");
+    ensure!(gap.lo < key && key < gap.hi, "{name} is not inside {} (already imported or registered?)", label_gap(&gap.lo, &gap.hi));
+    check_live("gap", gap_utxo, p.gap_value, Some(env.kit.registry_id))?;
+    let me = env.me();
+    let by_sponsor = item.entry.owner != me;
+    ensure!(!by_sponsor || m.sponsor == me, "the deployer is neither {name}'s snapshot owner nor the migration sponsor");
+    let e = &item.entry;
+    let fields = NameFields::new(name.as_bytes(), &e.owner, 0, e.period_start, e.expires_at);
+    let mut notes = vec![
+        format!(
+            "from the snapshot (leaf {}): owner {}, periodStart {}, expiresAt {}",
+            item.index,
+            p2pk_address(&e.owner),
+            fmt_ms(e.period_start),
+            fmt_ms(e.expires_at)
+        ),
+        format!("signed by the deployer as {}; no price, only the network fee", if by_sponsor { "the migration sponsor" } else { "the owner" }),
+    ];
+    if e.expires_at + p.grace_ms < env.wall_ms {
+        notes.push("already past expiresAt + grace: reclaimable as soon as it is imported".into());
+    } else if e.expires_at < env.wall_ms {
+        notes.push("expired: in grace, its owner can still renew it".into());
+    }
+    let d = Draft {
+        op: format!("import {name}"),
+        inputs: vec![(
+            gap_input(
+                env,
+                gap,
+                gap_utxo,
+                "import",
+                vec![
+                    bytes(name.as_bytes()),
+                    bytes(&e.owner),
+                    int(e.period_start),
+                    int(e.expires_at),
+                    int(item.index as i64),
+                    bytes(&item.proof),
+                    Arg::V(ArtifactValue::Bool(by_sponsor)),
+                    Arg::Sig(env.deployer),
+                    bytes(&env.kit.name.prefix),
+                    bytes(&env.kit.name.suffix),
+                ],
+            ),
+            format!("{} import", label_gap(&gap.lo, &gap.hi)),
+        )],
+        outputs: vec![
+            (env.kit.gap_output(&gap.lo, &key, 0), label_gap(&gap.lo, &key)),
+            (env.kit.gap_output(&key, &gap.hi, 0), label_gap(&key, &gap.hi)),
+            (env.kit.name_output(&fields, 0), format!("name {name} (owner {}, expires {})", p2pk_address(&e.owner), fmt_ms(e.expires_at))),
+        ],
+        lock_time: 0,
+        price_fee: 0,
+        notes,
+    };
+    finish(env, wallet, d, name_payload("import", name), Fee::Funded { max_inputs: MAX_IO_FEE_ENTRY })
+}
+
+/// The importable names of a snapshot file, checked (tree rebuilt, every proof matched).
+pub fn snapshot_items(v: &serde_json::Value) -> Result<Vec<SnapItem>> {
+    let snap = crate::snapshot::check_file(v)?;
+    let mut out = Vec::new();
+    for e in v["entries"].as_array().into_iter().flatten() {
+        let name = e["name"].as_str().unwrap_or("").to_string();
+        let index = snap.index_of(&name_key(name.as_bytes())).ok_or_else(|| anyhow!("{name}: not in the rebuilt tree"))?;
+        out.push(SnapItem { name, entry: snap.entries[index].clone(), index, proof: snap.proof(index) });
+    }
+    Ok(out)
 }

@@ -66,6 +66,18 @@ enum Cmd {
     },
     /// Show the two price tables baked into the gap and the name (read-only, no node needed)
     Prices,
+    /// The migration snapshot of the live registry: every name active or in grace at
+    /// `--at` (default now), as the tree registry v5's `import` checks. Run `scan` and
+    /// `verify --live` first: the snapshot is only as good as the scanned state. Writes
+    /// manifests/snapshots/<registry>-<atMs>.json (offline, no key)
+    Snapshot {
+        /// snapshot time, unix ms (default: now)
+        #[arg(long)]
+        at: Option<i64>,
+        /// instead: rebuild this snapshot file's tree and check its root and every proof
+        #[arg(long)]
+        check: Option<PathBuf>,
+    },
     /// Check the deployed manifest against the sources: compiles the contracts from
     /// contracts/ + params/, requires the committed artifacts and the manifest to match
     /// (offline, no node or key; exit 1 on any mismatch)
@@ -93,6 +105,18 @@ enum Cmd {
         /// with its 6-hour grace: 3300 (55 h) leaves a 1-period name lapsed even after one renewal)
         #[arg(long, default_value_t = 0)]
         backdate_minutes: i64,
+    },
+    /// Registry v5: import one snapshot name (the deployer signs as the migration sponsor)
+    Import {
+        name: String,
+        /// the snapshot file the registry was deployed with (default: params migration.snapshot)
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+    },
+    /// Registry v5: import every snapshot name not yet in the registry, one transaction each
+    ImportAll {
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
     },
     /// Extend a name's current period (anyone may; at most maxYears past its periodStart)
     Extend {
@@ -194,6 +218,31 @@ async fn run(cli: Cli, paths: Paths) -> Result<()> {
             ensure!(!cli.submit, "prices sends nothing");
             prices(&paths)
         }
+        Cmd::Snapshot { at, check } => {
+            ensure!(!cli.submit, "snapshot sends nothing");
+            if let Some(file) = check {
+                let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(file)?)?;
+                let snap = kachat_names_cli::snapshot::check_file(&v)?;
+                println!("OK  {} names, root {} (rebuilt from the entries; every stored proof matches)", snap.entries.len(), hex(&snap.root()));
+                return Ok(());
+            }
+            let reg = Registry::load(&paths.state())?
+                .ok_or_else(|| anyhow!("{} not found: run `scan` first", paths.rel(&paths.state())))?;
+            let grace = Templates::load(&paths.root).params.grace_ms;
+            let at_ms = at.unwrap_or_else(now_ms);
+            let taken = kachat_names_cli::snapshot::take(&reg, at_ms, grace);
+            let v = kachat_names_cli::snapshot::to_json(&taken, &reg, NETWORK, at_ms, grace);
+            let dir = paths.root.join("manifests").join("snapshots");
+            std::fs::create_dir_all(&dir)?;
+            let out = dir.join(format!("{}-{at_ms}.json", &reg.registry_id.to_string()[..16]));
+            std::fs::write(&out, serde_json::to_string_pretty(&v)? + "\n")?;
+            println!("snapshot of registry {} at {}", reg.registry_id, fmt_ms(at_ms));
+            println!("  kept   {} name(s), active or in grace: {}", taken.kept.len(), taken.kept.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "));
+            println!("  lapsed {} name(s), left behind: {}", taken.lapsed.len(), taken.lapsed.join(", "));
+            println!("  root   {}", hex(&taken.snapshot.root()));
+            println!("written to {}", paths.rel(&out));
+            Ok(())
+        }
         Cmd::Verify { json, live, indexer } => {
             ensure!(!cli.submit, "verify sends nothing");
             ensure!(*live || indexer.is_none(), "--indexer needs --live");
@@ -282,6 +331,20 @@ async fn verify_live(cli: &Cli, paths: &Paths, indexer: Option<&str>) -> Result<
     node.disconnect().await;
     let r = prove::check(&p, held.into_iter().map(|(a, _, e)| (a, e.covenant_id, e.amount)), &kit, d.registry_id)?;
     Ok(serde_json::json!({ "ok": true, "source": source, "names": r.names, "gaps": r.gaps, "node": url }))
+}
+
+/// The checked items of a snapshot file: `--snapshot`, else params `migration.snapshot`.
+fn load_snapshot_items(paths: &Paths, file: Option<&std::path::Path>) -> Result<Vec<ops::SnapItem>> {
+    let path = match file {
+        Some(f) => f.to_path_buf(),
+        None => {
+            let p: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(paths.params())?)?;
+            let f = p["migration"]["snapshot"].as_str().ok_or_else(|| anyhow!("no --snapshot and no migration.snapshot in params"))?;
+            paths.root.join(f)
+        }
+    };
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).with_context(|| path.display().to_string())?)?;
+    ops::snapshot_items(&v)
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +639,38 @@ async fn spend(l: &Live, cmd: &Cmd) -> Result<()> {
                 }
                 commits::save(&l.paths, &all)?;
             }
+            return Ok(());
+        }
+        Cmd::Import { name, snapshot } => {
+            let items = load_snapshot_items(&l.paths, snapshot.as_deref())?;
+            let item = items.iter().find(|i| i.name == *name).ok_or_else(|| anyhow!("{name} is not in the snapshot"))?;
+            let gap = reg
+                .gap_for_key(&item.entry.key)
+                .cloned()
+                .ok_or_else(|| anyhow!("{name} is already in the registry (no gap contains its key)"))?;
+            let lives = l.live_utxos(&[(gap.outpoint, gap_spk(&kit, &gap))]).await?;
+            let plan = ops::import(&env, &wallet, &gap, &lives[0], item)?;
+            if l.finish(&plan).await? {
+                l.save_after(&kit, &mut reg, &plan)?;
+            }
+            return Ok(());
+        }
+        Cmd::ImportAll { snapshot } => {
+            let items = load_snapshot_items(&l.paths, snapshot.as_deref())?;
+            let todo: Vec<_> = items.iter().filter(|i| reg.gap_for_key(&i.entry.key).is_some()).collect();
+            println!("{} snapshot name(s), {} still to import", items.len(), todo.len());
+            for item in todo {
+                let gap = reg.gap_for_key(&item.entry.key).cloned().expect("filtered");
+                let lives = l.live_utxos(&[(gap.outpoint, gap_spk(&kit, &gap))]).await?;
+                let wallet = l.wallet().await?;
+                let plan = ops::import(&env, &wallet, &gap, &lives[0], item)?;
+                if !l.finish(&plan).await? {
+                    println!("dry run: stopping after the first import (each import spends the gap the previous one creates)");
+                    return Ok(());
+                }
+                l.save_after(&kit, &mut reg, &plan)?;
+            }
+            println!("all snapshot names imported");
             return Ok(());
         }
         Cmd::Extend { name, years } => {

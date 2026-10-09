@@ -767,6 +767,6 @@ fn the_manifest_carries_and_verifies_the_genesis_binding() {
     let mut old = m.clone();
     old["registryVersion"] = serde_json::json!(3);
     kachat_names_cli::manifest::write(&file, &old).unwrap();
-    assert!(kachat_names_cli::manifest::load(&file, None).err().unwrap().to_string().contains("not a registry v4 manifest"));
+    assert!(kachat_names_cli::manifest::load(&file, None).err().unwrap().to_string().contains("not a registry v4 or v5 manifest"));
     std::fs::remove_file(file).unwrap();
 }

@@ -255,6 +255,22 @@ impl Sim {
         Ok(())
     }
 
+    /// Registry v5: import one snapshot name (the deployer as sponsor) and accept it.
+    pub fn import(&mut self, item: &ops::SnapItem) -> Result<()> {
+        let env = self.env()?;
+        let reg = self.reg.as_ref().ok_or_else(|| anyhow!("no genesis yet"))?;
+        let gap = reg.gap_for_key(&item.entry.key).cloned().ok_or_else(|| anyhow!("{} is already in the registry", item.name))?;
+        let gap_utxo = self.live(&gap.outpoint)?;
+        let plan = ops::import(&env, &self.wallet, &gap, &gap_utxo, item)?;
+        self.accept(plan)
+    }
+
+    /// Move the simulated clock (wall and median time) forward by `ms`.
+    pub fn advance_ms(&mut self, ms: i64) {
+        self.wall_ms += ms;
+        self.block.time_ms += ms as u64;
+    }
+
     pub fn run(&mut self, step: &Step) -> Result<()> {
         let me = xonly(&self.deployer);
         let plan = match step {

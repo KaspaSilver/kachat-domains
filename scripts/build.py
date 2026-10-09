@@ -71,8 +71,19 @@ def main():
     p = json.load(open(params_path))
     os.makedirs(out_dir, exist_ok=True)
     src = lambda n: os.path.join(ROOT, 'contracts', n + '.sil')
-    if p.get('registryVersion') != 4:
-        sys.exit('params are not registry v4 (registryVersion: 4)')
+    version = p.get('registryVersion')
+    if version not in (4, 5):
+        sys.exit('params are not registry v4 or v5 (registryVersion)')
+    # registry v5: the gap with `import` (contracts/v5/KachatGap.sil) bakes the migration
+    mig = p.get('migration') if version == 5 else None
+    if version == 5:
+        if not mig:
+            sys.exit('registry v5 params need a migration block (use root 00..00 and deadlineMs 0 for none)')
+        for k in ('root', 'sponsor'):
+            if len(bytes.fromhex(mig[k])) != 32:
+                sys.exit(f'migration.{k} must be 32 bytes')
+        if not 0 <= mig['deadlineMs'] < 1_000_000_000_000_000:
+            sys.exit('migration.deadlineMs out of range')
     if not 1 <= p['maxYears'] <= 31:
         sys.exit('maxYears must be 1..31')
     if not 60_000 <= p['periodMs'] <= 31_536_000_000:
@@ -98,24 +109,28 @@ def main():
 
     info = {
         'network': p['network'],
-        'registryVersion': 4,
+        'registryVersion': version,
         'compiler': p['compiler'],
         'params': {k: p[k] for k in ('bond', 'gapValue', 'tCommit', 'maxYears', 'periodMs', 'graceMs', 'renewWindowMs',
                                      'prices', 'offerMaxFee', 'genesisGap')},
         'registryCovenantId': p.get('registryCovenantId'),
         'contracts': {},
     }
+    if mig:
+        info['migration'] = mig
 
     name = compile_contract(silverc, src('KachatName'), [
         B(ZERO32), B(ZERO32), B(ZERO32), I(0), I(0), I(0),
         I(p['bond']), I(p['maxYears']), I(p['graceMs']), I(p['renewWindowMs']), I(p['periodMs']),
     ] + ren, os.path.join(out_dir, 'KachatName.json'))
     nl = layout(name)
-    gap = compile_contract(silverc, src('KachatGap'), [
+    gap_source = os.path.join(ROOT, 'contracts', 'v5', 'KachatGap.sil') if version == 5 else src('KachatGap')
+    migration_args = [B(bytes.fromhex(mig['root'])), I(mig['deadlineMs']), B(bytes.fromhex(mig['sponsor']))] if version == 5 else []
+    gap = compile_contract(silverc, gap_source, [
         B(bytes.fromhex(p['genesisGap']['lo'])), B(bytes.fromhex(p['genesisGap']['hi'])),
         B(bytes.fromhex(nl['templateHash'])), I(nl['prefixLen']), I(nl['suffixLen']),
         I(p['bond']), I(p['gapValue']), I(p['tCommit']), I(p['maxYears']), I(p['periodMs']),
-    ] + reg + ren, os.path.join(out_dir, 'KachatGap.json'))
+    ] + reg + ren + migration_args, os.path.join(out_dir, 'KachatGap.json'))
     gl = layout(gap)
     info['contracts'].update({'KachatName': nl, 'KachatGap': gl})
     summary = [f"name {nl['bytecodeLen']} B", f"gap {gl['bytecodeLen']} B"]

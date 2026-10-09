@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use crate::{manifest, net::NETWORK, ops::Templates, paths::Paths, util::hex};
 
 /// The params the manifest copies from params/<net>.json (the templates bake them all).
-const PARAM_KEYS: &[&str] = &["bond", "gapValue", "tCommit", "maxYears", "periodMs", "graceMs", "renewWindowMs", "prices", "offerMaxFee"];
+const PARAM_KEYS: &[&str] = &["bond", "gapValue", "tCommit", "maxYears", "periodMs", "graceMs", "renewWindowMs", "prices", "offerMaxFee", "registryVersion", "migration"];
 
 /// Verify the deployed manifest; the summary is what an operator needs to point an indexer at it.
 pub fn verify(paths: &Paths) -> Result<Value> {

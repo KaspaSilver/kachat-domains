@@ -85,6 +85,10 @@ pub struct NetParams {
     /// sompi per further period (extend, renew, and registering past one period)
     pub renew_prices: [u64; 5],
     pub offer_max_fee: u64,
+    /// 4, or 5 (registry v5: the gap with `import`, `contracts/v5/KachatGap.sil`)
+    pub registry_version: u32,
+    /// registry v5: the registry this one migrates from (`migration` in params)
+    pub migration: Option<Migration>,
 }
 
 fn tiers(p: &serde_json::Value) -> [u64; 5] {
@@ -113,6 +117,15 @@ impl NetParams {
             register_prices: tiers(&v["prices"]["register"]),
             renew_prices: tiers(&v["prices"]["renew"]),
             offer_max_fee: u(&v["offerMaxFee"]),
+            registry_version: v["registryVersion"].as_u64().unwrap_or(4) as u32,
+            migration: v.get("migration").filter(|m| !m.is_null()).map(|m| {
+                let h = |k: &str| {
+                    let mut b = [0u8; 32];
+                    faster_hex::hex_decode(m[k].as_str().unwrap_or("").as_bytes(), &mut b).expect("migration: 32 hex bytes");
+                    b
+                };
+                Migration { root: h("root"), deadline_ms: m["deadlineMs"].as_i64().expect("migration.deadlineMs"), sponsor: h("sponsor") }
+            }),
         }
     }
 
@@ -608,8 +621,12 @@ pub fn name_args(params: &NetParams) -> Vec<ArtifactValue> {
     args
 }
 
-/// Compile KachatGap for `name` with the params' register and renew tables.
+/// Compile KachatGap for `name` with the params' register and renew tables: v4's
+/// `contracts/KachatGap.sil`, or v5's with the params' migration.
 pub fn compile_gap_in(root: &Path, params: &NetParams, name: &Template) -> Template {
+    if params.registry_version >= 5 {
+        return compile_gap_v5_in(root, params, name, &params.migration.unwrap_or(Migration::NONE));
+    }
     let src = std::fs::read_to_string(root.join("contracts/KachatGap.sil")).unwrap();
     compile_source(&src, &gap_args(params, name))
 }
