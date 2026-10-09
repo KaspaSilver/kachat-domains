@@ -24,43 +24,58 @@ open(f, 'w').write(s.replace(old, new, 1))
 PY
   ./scripts/build.sh >/dev/null 2>&1 || { echo "  $4: BUILD FAILED"; git checkout -q -- contracts artifacts; return; }
   local out killed
-  out="$(cd harness && cargo test --release --offline --no-fail-fast 2>/dev/null)"
+  out="$(cd harness && env ${MUT_ENV:-} cargo test --release --offline --no-fail-fast 2>/dev/null)"
   killed="$(grep -E '^test .* FAILED$' <<<"$out" | sed -E 's/^test (.*) \.\.\. FAILED$/\1/' | tr '\n' ' ')"
   if [[ -z "$killed" ]]; then echo "SURVIVED  $4"; else echo "killed    $4  <- $killed"; fi
   git checkout -q -- contracts artifacts
 }
 
-G=contracts/KachatGap.sil; N=contracts/KachatName.sil; O=contracts/KachatOffer.sil
-mutate $G 'require(relativeLock >= tCommit, "commit matured");' '' "gap: commit maturity"
-mutate $G 'require(unsigned(seq[7]) < 128, "commit sequence lock enabled");' '' "gap: sequence-lock disable bit"
-mutate $G 'require(tx.inputs[1].scriptPubKey == byte[](commitLock), "commit script");' '' "gap: commit script"
-mutate $G 'require(tx.time >= temporal(now));' '' "gap: now <= lock time"
-mutate $G 'require(years <= maxYears, "years <= maxYears");' '' "gap: max years"
-# registry v4: fixed tables, the first period at the registration price, the rest at the renewal price
-mutate $G 'require(minerFee() >= priceFor(len, years), "price paid as miner fee");' '' "gap: price paid at all"
-mutate $G 'return first + next * (years - 1);' 'return first;' "gap: further periods paid"
-mutate $G 'return first + next * (years - 1);' 'return next * years;' "gap: the first period at the registration price"
-mutate $G 'return first + next * (years - 1);' 'return first * years;' "gap: further periods at the renewal price, not the registration price"
-mutate $G 'first = reg1;' 'first = reg2;' "gap: tier 1 registration price"
-mutate $G 'first = reg3;' 'first = reg4;' "gap: tier 3 registration price"
-mutate $G 'next = renew2;' 'next = renew3;' "gap: tier 2 renewal price"
-mutate $G 'if (len == 1) {
+# The gap's register / merge checks, run on both gaps: contracts/KachatGap.sil (v4, what
+# mainnet launches with; the suite runs it with KACHAT_GAP=v4) and contracts/v5/KachatGap.sil.
+gap_mutations() { # file label
+  local F="$1" P="$2"
+  mutate $F 'require(relativeLock >= tCommit, "commit matured");' '' "$P: commit maturity"
+  mutate $F 'require(unsigned(seq[7]) < 128, "commit sequence lock enabled");' '' "$P: sequence-lock disable bit"
+  mutate $F 'require(tx.inputs[1].scriptPubKey == byte[](commitLock), "commit script");' '' "$P: commit script"
+  mutate $F 'require(tx.time >= temporal(now));' '' "$P: now <= lock time"
+  mutate $F 'require(years <= maxYears, "years <= maxYears");' '' "$P: max years"
+  # registry v4: fixed tables, the first period at the registration price, the rest at the renewal price
+  mutate $F 'require(minerFee() >= priceFor(len, years), "price paid as miner fee");' '' "$P: price paid at all"
+  mutate $F 'return first + next * (years - 1);' 'return first;' "$P: further periods paid"
+  mutate $F 'return first + next * (years - 1);' 'return next * years;' "$P: the first period at the registration price"
+  mutate $F 'return first + next * (years - 1);' 'return first * years;' "$P: further periods at the renewal price, not the registration price"
+  mutate $F 'first = reg1;' 'first = reg2;' "$P: tier 1 registration price"
+  mutate $F 'first = reg3;' 'first = reg4;' "$P: tier 3 registration price"
+  mutate $F 'next = renew2;' 'next = renew3;' "$P: tier 2 renewal price"
+  mutate $F 'if (len == 1) {
             first = reg1;
             next = renew1;' 'if (len == 1) {
             first = reg5;
-            next = renew5;' "gap: 1-char tier (both tables)"
-mutate $G 'require(lessThan(lo, newKey), "lo < key");' '' "gap: lo < key"
-mutate $G 'require(lessThan(newKey, hi), "key < hi");' '' "gap: key < hi"
-mutate $G 'require(charset[unsigned(n[i])] == 0x01, "name charset");' '' "gap: charset"
-mutate $G 'require(n[0] != 0x2d, "no leading hyphen");' '' "gap: leading hyphen"
-mutate $G 'require(n[n.length - 1] != 0x2d, "no trailing hyphen");' '' "gap: trailing hyphen"
-mutate $G 'require(OpCovOutputCount(covId) == 3, "three registry outputs");' '' "gap: register output count (redundant with AuthOutputCount(0) == 3 + one registry input)"
-mutate $G 'require(tx.outputs[2].value == bond, "name bond");' '' "gap: name bond value"
-mutate $G 'require(tx.inputs.length <= MAX_INPUTS, "at most 8 inputs");' '' "gap: input bound (redundant with the compiler loop guard, which TUTORIAL.md says not to rely on)"
-mutate $G 'price: 0, periodStart: now, expiresAt: expiry' 'price: 0, periodStart: now - 1, expiresAt: expiry' "gap: register periodStart = now"
-mutate $G 'require(seated.key == hi, "name at hi");' '' "gap: merge name adjacency"
-mutate $G 'require(succ.lo == hi, "successor starts at hi");' '' "gap: merge successor adjacency"
-mutate $G 'require(tx.outputs[0].value == gapValue, "merged gap value");' '' "gap: merged gap value"
+            next = renew5;' "$P: 1-char tier (both tables)"
+  mutate $F 'require(lessThan(lo, newKey), "lo < key");' '' "$P: lo < key"
+  mutate $F 'require(lessThan(newKey, hi), "key < hi");' '' "$P: key < hi"
+  mutate $F 'require(charset[unsigned(n[i])] == 0x01, "name charset");' '' "$P: charset"
+  mutate $F 'require(n[0] != 0x2d, "no leading hyphen");' '' "$P: leading hyphen"
+  mutate $F 'require(n[n.length - 1] != 0x2d, "no trailing hyphen");' '' "$P: trailing hyphen"
+  mutate $F 'require(OpCovOutputCount(covId) == 3, "three registry outputs");' '' "$P: register output count (redundant with AuthOutputCount(0) == 3 + one registry input)"
+  mutate $F 'require(tx.outputs[2].value == bond, "name bond");' '' "$P: name bond value"
+  mutate $F 'require(tx.inputs.length <= MAX_INPUTS, "at most 8 inputs");' '' "$P: input bound (redundant with the compiler loop guard, which TUTORIAL.md says not to rely on)"
+  mutate $F 'price: 0, periodStart: now, expiresAt: expiry' 'price: 0, periodStart: now - 1, expiresAt: expiry' "$P: register periodStart = now"
+  mutate $F 'require(seated.key == hi, "name at hi");' '' "$P: merge name adjacency"
+  mutate $F 'require(succ.lo == hi, "successor starts at hi");' '' "$P: merge successor adjacency"
+  mutate $F 'require(tx.outputs[0].value == gapValue, "merged gap value");' '' "$P: merged gap value"
+  mutate $F 'require(cov == noCov || cov == ownCov, "no other covenant shares the fee");' '' "$P: no other covenant shares the fee (C2)"
+  mutate $F 'require(OpCovOutputIdx(covId, 2) == 2, "registry output 2");' '' "$P: the name at registry output 2"
+  mutate $F 'require(OpCovOutputIdx(covId, 0) == 0, "registry output 0");' '' "$P: merge, the merged gap at registry output 0"
+  mutate $F 'require(years >= 1, "years >= 1");' '' "$P: years >= 1"
+  mutate $F 'require(now <= MAX_NOW, "now range");' '' "$P: now range"
+  mutate $F 'require(tx.outputs[0].value == gapValue, "lower gap value");' '' "$P: lower gap value"
+  mutate $F 'require(tx.outputs[1].value == gapValue, "upper gap value");' '' "$P: upper gap value"
+  mutate $F 'require(ownerKey != byte[32](0x0000000000000000000000000000000000000000000000000000000000000000), "owner key");' '' "$P: zero owner key (redundant: the commit input must be signed by ownerKey, which no one can for the zero key)"
+}
+G=contracts/KachatGap.sil; N=contracts/KachatName.sil; O=contracts/KachatOffer.sil
+MUT_ENV=KACHAT_GAP=v4; gap_mutations $G "gap"
+MUT_ENV=; gap_mutations contracts/v5/KachatGap.sil "v5 gap"
 mutate $N 'return raw[64] == 0x01 && checkSig' 'return checkSig' "name: SIGHASH_ALL only"
 mutate $N 'require(OpCovInputCount(covId) == 1, "one registry input");' '' "name: one registry input (redundant with one registry output; the pair is tested below)"
 mutate $N 'require(OpCovOutputCount(covId) == 1, "one registry output");' '' "name: one registry output (redundant with one registry input + one continuation)"
@@ -128,6 +143,28 @@ mutate $O 'require(tx.outputs.length == 1, "one return output");' '' "offer: dec
 mutate $O 'require(tx.outputs[0].scriptPubKey == byte[](buyerLock), "back to the buyer");' '' "offer: decline to the buyer"
 mutate $O 'require(tx.outputs[0].value >= tx.inputs[0].value - maxFee, "return covers the offer");' '' "offer: decline value"
 
+# C2 and the exit's output position (the gap's exitShape checks the same: tests/exit.rs checks both inputs)
+mutate $N 'require(cov == noCov || cov == ownCov, "no other covenant shares the fee");' '' "name: no other covenant shares the fee (C2)"
+mutate $N 'require(OpCovOutputIdx(covId, 0) == 0, "registry output 0");' '' "name: exit, the merged gap at registry output 0"
+# every owner-signature call site, and the keys and prices the owner sets
+mutate $N 'entry transfer(byte[32] newOwner, sig ownerSig) {
+        require(ownerSigned(ownerSig, owner), "owner signature");' 'entry transfer(byte[32] newOwner, sig ownerSig) {' "name: transfer needs the owner"
+mutate $N 'entry list(int newPrice, sig ownerSig) {
+        require(ownerSigned(ownerSig, owner), "owner signature");' 'entry list(int newPrice, sig ownerSig) {' "name: list needs the owner"
+mutate $N 'entry release(sig ownerSig) {
+        require(ownerSigned(ownerSig, owner), "owner signature");' 'entry release(sig ownerSig) {' "name: release needs the owner"
+mutate $N 'require(ownerSigned(ownerSig, owner), "owner signature");
+        require(newOwner != byte[32](0x0000000000000000000000000000000000000000000000000000000000000000), "owner key");' 'require(ownerSigned(ownerSig, owner), "owner signature");' "name: transfer to a zero key"
+mutate $N 'require(price > 0, "listed");
+        require(newOwner != byte[32](0x0000000000000000000000000000000000000000000000000000000000000000), "owner key");' 'require(price > 0, "listed");' "name: buy for a zero key"
+mutate $N 'require(price > 0, "listed");' '' "name: buy only when listed"
+mutate $N 'require(newPrice >= 0, "price >= 0");' '' "name: list price >= 0"
+mutate $N 'require(newPrice <= MAX_PRICE, "price <= supply");' '' "name: list price <= supply"
+mutate $O 'require(raw[64] == 0x01, "SIGHASH_ALL");' '' "offer: withdraw SIGHASH_ALL only"
+mutate $O 'require(checkSig(buyerSig, pubkey(buyer)), "buyer signature");' '' "offer: withdraw needs the buyer"
+mutate $O 'require(tx.outputs.length == 1, "one refund output");' '' "offer: refund one output"
+mutate $O 'require(tx.outputs[0].value >= tx.inputs[0].value - maxFee, "refund covers the offer");' '' "offer: refund value"
+
 # registry v5 (contracts/v5/KachatGap.sil): import from a migration snapshot,
 # register closed until the snapshot deadline. The harness compiles this gap
 # in-process (tests/import.rs), so no artifact depends on it.
@@ -154,3 +191,4 @@ mutate $G5 'require(tx.outputs[1].value == gapValue, "import: upper gap value");
 mutate $G5 'NameState { key: newKey, name: padded, owner: owner, price: 0, periodStart: periodStart, expiresAt: expiresAt }' 'NameState { key: newKey, name: padded, owner: owner, price: 0, periodStart: periodStart, expiresAt: expiresAt + 1 }' "v5 import: the name keeps the snapshot expiry"
 mutate $G5 'require(OpCovOutputCount(covId) == 3, "import: three registry outputs");' '' "v5 import: output count (redundant with AuthOutputCount(0) == 3 + one registry input, as register)"
 mutate $G5 'require(this.activeInputIndex == 0, "import: gap at input 0");' '' "v5 import: gap at input 0 (redundant: covId is read from input 0 and exactly one registry input is allowed)"
+mutate $G5 'require(OpCovOutputIdx(covId, 2) == 2, "import: registry output 2");' '' "v5 import: the name at registry output 2"
