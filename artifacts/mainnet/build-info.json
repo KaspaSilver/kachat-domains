@@ -39,14 +39,14 @@
   "registryCovenantId": null,
   "contracts": {
     "KachatName": {
-      "bytecodeLen": 3108,
+      "bytecodeLen": 3406,
       "stateSpan": {
         "offset": 1,
         "len": 126
       },
       "prefixLen": 1,
-      "suffixLen": 2981,
-      "templateHash": "13bcd781dc95bdba93f89d7f4875bfbdb88e25f84638a8c8c7c1fd08e629e7ed",
+      "suffixLen": 3279,
+      "templateHash": "259e0250a2bba8587a74b2ad366c45916565593db6eb44c3751dacba943f19d6",
       "dispatchTags": {
         "buy": "76a02eb9",
         "extend": "2ce7cceb",
@@ -56,23 +56,23 @@
         "renew": "b706ac38",
         "transfer": "794dca54"
       },
-      "bytecodeSha256": "f56ee63526791cc22a3be573d7587d6d85fbf10d4310b7bbe94c8987afc3f396"
+      "bytecodeSha256": "ba553ec0da9ba020641f60b9b318eea8f3a5c1cd5dc12c591b4cc5cd1ce88de7"
     },
     "KachatGap": {
-      "bytecodeLen": 4067,
+      "bytecodeLen": 4216,
       "stateSpan": {
         "offset": 1,
         "len": 66
       },
       "prefixLen": 1,
-      "suffixLen": 4000,
-      "templateHash": "6d1da31fda9c2f5fc306b049ee229084fa4eac21598c06e292a141a7dbba84b2",
+      "suffixLen": 4149,
+      "templateHash": "d70afe60686842b92ec8b4f6da34eb20462f0a98c26922de62b82ae65cfc1d4f",
       "dispatchTags": {
         "absorbed": "dab76355",
         "merge": "63d25bc2",
         "register": "8667af5e"
       },
-      "bytecodeSha256": "c8a7a2ee4ad20b99d733e992a6665ce4a26c904e000d7bba8c7bdfa69d82767c"
+      "bytecodeSha256": "8208de3fca95904445cd3e06ba084c9983554cd0cca1ded116a5b718b98ebc90"
     },
     "KachatOffer": "not built: set registryCovenantId after the registry genesis"
   }

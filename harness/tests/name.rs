@@ -683,6 +683,18 @@ fn an_extend_and_a_renew_cannot_share_one_fee() {
 }
 
 #[test]
+fn renew_and_extend_reject_funding_from_another_covenant() {
+    // C2: another covenant's input must not pay a fee this name also counts.
+    let kit = Kit::new();
+    let n = name_case(&kit, b"alice", 0);
+    for (mut spec, blk) in [(renew(&kit, &n, 1), window_block(&kit, &n)), (extend(&kit, &n, 1), active_block())] {
+        ok(&kit, &spec, blk);
+        spec.inputs[1].utxo.entry.covenant_id = Some(Hash::from_bytes([0x99; 32]));
+        input_fails(&kit, &spec, blk, 0);
+    }
+}
+
+#[test]
 fn renew_and_extend_reject_more_than_eight_inputs() {
     let kit = Kit::new();
     let n = name_case(&kit, b"alice", 0);

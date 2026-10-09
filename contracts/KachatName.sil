@@ -111,8 +111,15 @@ contract KachatName(
     function minerFee(): int {
         require(tx.inputs.length <= MAX_INPUTS, "at most 8 inputs");
         require(tx.outputs.length <= MAX_OUTPUTS, "at most 8 outputs");
+        // Every input is this registry's or carries no covenant: the fee pays this
+        // registry's price only, never another covenant's in the same transaction (one fee
+        // counted twice, e.g. a v5 register and a v4 extend while both registries exist).
+        byte[32] ownCov = OpInputCovenantId(this.activeInputIndex);
+        byte[32] noCov = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
         int sumIn = 0;
         for (i, 0, tx.inputs.length, MAX_INPUTS) {
+            byte[32] cov = OpInputCovenantId(i);
+            require(cov == noCov || cov == ownCov, "no other covenant shares the fee");
             int v = tx.inputs[i].value;
             require(v <= MAX_IO_VALUE, "input value cap");
             sumIn = sumIn + v;

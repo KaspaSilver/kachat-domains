@@ -411,6 +411,16 @@ fn rejects_moved_output_positions() {
 }
 
 #[test]
+fn rejects_funding_from_another_covenant() {
+    // C2: an input of another covenant (here a P2PK-locked UTXO carrying a foreign
+    // covenant id) could have its value counted by both covenants' fee checks.
+    let kit = Kit::new();
+    let mut r = register(&kit, b"alice", 1);
+    r.spec.inputs[2].utxo.entry.covenant_id = Some(Hash::from_bytes([0x99; 32]));
+    gap_fails(&kit, &r);
+}
+
+#[test]
 fn rejects_wrong_output_values() {
     let kit = Kit::new();
     for (idx, delta) in [(0usize, 1i64), (0, -1), (1, 1), (2, -1), (2, 1)] {
