@@ -341,3 +341,14 @@ fn the_gap_must_be_input_0() {
     }
     input_fails(&kit, &spec, active_block(), 1);
 }
+
+#[test]
+fn an_unbound_name_at_output_2_with_a_forged_registry_output_after_it_fails() {
+    // Only `OpCovOutputIdx(covId, 2) == 2` refuses this shape.
+    let (kit, snap, n) = setup();
+    let mut spec = import(&kit, &ImportArgs::of(&snap, &n[0], true));
+    spec.outputs[2].covenant = None;
+    spec.outputs.insert(3, kit.gap_output(&ZERO32, &FF32, 0));
+    spec.inputs[1].utxo.entry.amount += kit.params.gap_value;
+    import_fails(&kit, &spec);
+}

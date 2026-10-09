@@ -104,10 +104,12 @@ fn rejects_zero_years_and_more_than_max_years() {
     for years in [0, kit.params.max_years + 1, -1] {
         let mut r = register(&kit, b"alice", 1);
         r.spec.inputs[0].args_mut()[4] = int(years);
+        // make the name output and the fee consistent with the claimed years, so only the
+        // years bounds can refuse it (for 0 and -1 the expiry is now / a period ago, and the
+        // fee already covers more than priceFor(len, years))
+        let fields = NameFields::new(b"alice", &xonly(&r.owner), 0, NOW_MS, NOW_MS + years * PERIOD);
+        r.spec.outputs[2] = kit.name_output(&fields, 0);
         if years > 0 {
-            // make the name output and the fee consistent with the claimed years
-            let fields = NameFields::new(b"alice", &xonly(&r.owner), 0, NOW_MS, NOW_MS + years * PERIOD);
-            r.spec.outputs[2] = kit.name_output(&fields, 0);
             r.spec.inputs[2].utxo.entry.amount += kit.params.register_cost(5, years); // the funding
             assert!(r.fee() as u64 >= kit.params.register_cost(5, years));
         }
@@ -408,6 +410,19 @@ fn rejects_moved_output_positions() {
     r.spec.outputs.insert(0, change);
     gap_fails(&kit, &r);
     drop(r0);
+}
+
+#[test]
+fn rejects_an_unbound_name_at_output_2_with_a_forged_registry_output_after_it() {
+    // Three registry outputs, the first two in place, but output 2 is the right name
+    // *unbound* and the third registry output is a forged gap (00.., ff..) at 3: only
+    // `OpCovOutputIdx(covId, 2) == 2` refuses it.
+    let kit = Kit::new();
+    let mut r = register(&kit, b"alice", 1);
+    r.spec.outputs[2].covenant = None;
+    r.spec.outputs.insert(3, kit.gap_output(&ZERO32, &FF32, 0));
+    r.spec.inputs[2].utxo.entry.amount += kit.params.gap_value; // the funding
+    gap_fails(&kit, &r);
 }
 
 #[test]

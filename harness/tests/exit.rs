@@ -84,6 +84,20 @@ fn merge_rejects_a_forged_seat_2_gap() {
 }
 
 #[test]
+fn the_merged_gap_must_be_registry_output_0() {
+    // Output 0 is the right merged gap but unbound; the one registry output is a
+    // forged gap (00.., ff..) at 1. Both merge and the name's exit check refuse it.
+    let kit = Kit::new();
+    let mut e = release(&kit, b"alice");
+    e.spec.outputs[0].covenant = None;
+    e.spec.outputs.insert(1, kit.gap_output(&ZERO32, &FF32, 0));
+    let last = e.spec.outputs.len() - 1;
+    e.spec.outputs[last].value -= kit.params.gap_value;
+    fails_at(&kit, &e, 0);
+    fails_at(&kit, &e, 1);
+}
+
+#[test]
 fn merge_rejects_a_forged_seat_2_with_another_covenant_id() {
     // Same, but the forged gap carries a covenant id of its own.
     let kit = Kit::new();

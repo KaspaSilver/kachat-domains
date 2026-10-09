@@ -236,4 +236,10 @@ fn dispatch_tags_are_stable() {
         let expect = faster_hex::hex_string(&blake3::hash(sig.as_bytes()).as_bytes()[..4]);
         assert_eq!(tag, &expect, "{e}");
     }
+    // registry v5's import (the app and the indexer decode it by this tag)
+    if kit.params.registry_version >= 5 {
+        let sig = "import(byte[],byte[32],int,int,int,byte[],bool,sig,byte[],byte[])";
+        assert_eq!(kit.gap.dispatch_tag("import"), faster_hex::hex_string(&blake3::hash(sig.as_bytes()).as_bytes()[..4]));
+        assert_eq!(kit.gap.dispatch_tag("import"), "aa4cc365");
+    }
 }
