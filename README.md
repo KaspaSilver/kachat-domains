@@ -11,13 +11,11 @@ Design: `KaChat/KACHAT_NAMES.md` in the app repo. Specs: [docs/REGISTRY_V4.md](d
 import). Mainnet launch: [docs/MAINNET.md](docs/MAINNET.md).
 
 **Status (2026-10-09):**
-- **Registry v5 is live on testnet-10.** Registry `fdc403f5ef76ea7c71dcb5305d09daf7ab7fd68dc1d274a314fc8ca9111e571d`,
-  genesis `408682e6…dfda5`, deployed 2026-10-09 by migrating every name of the v4 registry
-  `e6b72448…7f0d` (the drill in REGISTRY_V5.md section 6). It runs on a **day clock**: mainnet's
+- **Registry v5 is live on testnet-10, on the pre-mainnet-audit code.** Registry
+  `1283f749506c454488a6b7264197658ed1c12051f1887905c4396243a89fbfa2`, genesis `b6223f0f…e24f`,
+  deployed 2026-10-09 by migrating every name of the previous v5 registry `fdc403f5…571d` (built
+  before the audit's C2 fix and the 0.1 KAS offer fee cap). It runs on a **day clock**: mainnet's
   year scaled to 24 hours.
-- **The contracts changed after that deployment** (the pre-mainnet audit's C2 fix), so the
-  testnet artifacts in this repo describe the *next* testnet registry. Testnet moves to it with
-  another migration, and until then `verify` fails on testnet-10.
 - **Mainnet is not deployed.** It launches **v4** (`docs/MAINNET.md`), after the external audit
   and the owner's go-ahead.
 - **Earlier testnet registries** are archived in `manifests/` (see
@@ -527,8 +525,8 @@ State ints *inside* the redeem are different: always 8 bytes behind an `0x08` pu
 
 All on testnet-10. Archived manifests are in `manifests/<dir>/`; the live one is
 `manifests/kachat-names-testnet-10.json`. A new version, or new baked settings, needs a new
-genesis, and names don't carry over. Migration (a snapshot import into the next version) is
-designed in [docs/REGISTRY_V4.md](docs/REGISTRY_V4.md) section 3, but not built yet.
+genesis. Since v5 the names carry over: the new registry imports a snapshot of the old one
+([docs/REGISTRY_V5.md](docs/REGISTRY_V5.md)).
 
 | Registry | Version | Clock | Genesis | Where |
 |---|---|---|---|---|
@@ -536,7 +534,9 @@ designed in [docs/REGISTRY_V4.md](docs/REGISTRY_V4.md) section 3, but not built 
 | `82f4315c…` | v2: periodStart, `extend`, renewal window | yearly | `e20325f7…` | `manifests/v2/` |
 | `90f56bd1…` | v3: price record + authority key, seller-bound offers, `decline`, `periodMs` | 10 min | `fa8b21d2…` | `manifests/v3/`, spec `docs/REGISTRY_V3.md` |
 | `bff18554…` | v4: fixed register + renew tables, no price key | 10 min | `b1f28a5f…` | `manifests/v4-10min/` |
-| **`e6b72448…`** | **v4** | **24 h** | **`5ffdd006…`** | **live** |
+| `e6b72448…` | v4 | 24 h | `5ffdd006…` | `manifests/v4-day/` |
+| `fdc403f5…` | v5: migration import (6 names from `e6b72448…`) | 24 h | `408682e6…` | `manifests/v5-drill/` |
+| **`1283f749…`** | **v5, audit fixes (6 names from `fdc403f5…`)** | **24 h** | **`b6223f0f…`** | **live** |
 
 ## Deviations from KACHAT_NAMES.md
 

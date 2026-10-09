@@ -1,15 +1,17 @@
 # Registry v5: migration (2026-10-09)
 
 Status:
-- **Live on testnet-10 since 2026-10-09:** registry `fdc403f5…571d`, genesis `408682e6…dfda5`.
-  The drill (section 6) imported all 6 names of the day-clock v4 registry `e6b72448…7f0d`, each with
-  the same owner and dates, and `verify --live` passes.
+- **Live on testnet-10:** registry `1283f749…bfa2`, genesis `b6223f0f…e24f` (2026-10-09, 18:40
+  UTC), on the code after the pre-mainnet audit.
+- **Two drills, both 2026-10-09.** Each imported every name with the same owner and dates, and
+  `verify --live` passed:
+  - the day-clock v4 registry `e6b72448…7f0d` to the v5 registry `fdc403f5…571d` (6 names);
+  - `fdc403f5…571d` (the code before the audit's C2 fix) to `1283f749…bfa2` (the same 6 names,
+    the same snapshot root `0642b3e0…`).
 - **Mainnet launches v4, not v5** (`docs/MAINNET.md`). v5 is the escape route: the registry a
   mainnet fix or price change would migrate to.
-- **Changed since the drill:** the pre-mainnet audit's C2 fix (2026-10-09). The fee sum refuses
-  inputs of another covenant. It changes the v5 gap (and the v4 gap and the name) templates, so
-  the live testnet registry runs the code from before the fix. Testnet moves to the fixed code
-  with another migration.
+- **The audit's C2 fix** (the fee sum refuses inputs of another covenant) and the 0.1 KAS offer
+  fee cap changed the templates, hence the second drill.
 
 **Why.**
 - A registry can't be upgraded: contracts are immutable, and there is no upgrade key, by design.
@@ -154,7 +156,8 @@ optimisation for later, not a blocker.
 ## 6. The testnet drill
 
 From the live day-clock v4 registry (`e6b72448…7f0d`) to a v5 testnet registry. **Done
-2026-10-09** (registry `fdc403f5…571d`). The steps stay the runbook for the next migration.
+2026-10-09** (registry `fdc403f5…571d`), and again the same day from `fdc403f5…` to the audited
+code (`1283f749…bfa2`). The steps stay the runbook for the next migration.
 
 1. **Freeze the snapshot.**
    1. `kachat-names scan`.
