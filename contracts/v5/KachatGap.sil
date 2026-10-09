@@ -1,0 +1,368 @@
+pragma silverscript ^0.1.0;
+
+// .kachat registry gap, registry v5 (KACHAT_NAMES.md sections 1-2;
+// docs/REGISTRY_V5.md).
+//
+// v5 = v4 plus a migration path: `import` re-creates the names of an earlier
+// registry from a snapshot of it, with their owners and paid periods, and
+// `register` stays closed until the snapshot's deadline so nobody can take a
+// snapshot name before it is imported. A registry with no predecessor has
+// snapshotRoot = 0 (nothing can be imported) and snapshotDeadline = 0.
+//
+// A gap is an open interval (lo, hi) of the 32-byte key space that contains
+// no registered key; key = blake3(name). Genesis creates the single gap
+// (00..00, ff..ff). All gaps and names share one registry covenant id.
+//
+// Runtime state (66 bytes): lo byte[32], hi byte[32].
+//
+// Baked parameters (change them and the template hash changes):
+//   nameTemplateHash, namePrefixLen, nameSuffixLen  the KachatName template
+//   bond      exact value of a name UTXO
+//   gapValue  exact value of every gap UTXO
+//   tCommit   minimum age, in DAA score, of the commit UTXO at registration
+//   maxYears  most periods a registration may prepay
+//   periodMs  length of one paid period (a year on mainnet, 24 hours on the
+//             testnet-10 day clock)
+//   reg1 .. reg5      registration price, sompi, for the first period of a
+//                     name of 1, 2, 3, 4 and 5+ bytes (registry v4: fixed,
+//                     no price record and no authority key)
+//   renew1 .. renew5  price of each further period (the same table KachatName
+//                     charges for extend and renew)
+//
+//   snapshotRoot      Merkle root of the predecessor registry's names at the
+//                     snapshot block (see `import`); 0 = no predecessor
+//   snapshotDeadline  unix ms: register is refused before it
+//   snapshotSponsor   x-only key that may import every snapshot name on its
+//                     owner's behalf (the deployer, for the bulk import);
+//                     0 = owners import their own names only
+//
+// Entries:
+//   register  @0, alone: splits (lo, hi) into (lo, key) and (key, hi) and
+//             mints the name UTXO, against a matured commit at input 1
+//   import    @0, alone: the same split, minting a snapshot name with its
+//             snapshot owner and dates, signed by that owner or the sponsor
+//   merge     @0 of the exit [merge, name.release|name.reclaim, absorbed]
+//   absorbed  @2 of the exit
+contract KachatGap(
+    byte[32] initLo,
+    byte[32] initHi,
+    byte[32] nameTemplateHash,
+    int namePrefixLen,
+    int nameSuffixLen,
+    int bond,
+    int gapValue,
+    int tCommit,
+    int maxYears,
+    int periodMs,
+    int reg1,
+    int reg2,
+    int reg3,
+    int reg4,
+    int reg5,
+    int renew1,
+    int renew2,
+    int renew3,
+    int renew4,
+    int renew5,
+    byte[32] snapshotRoot,
+    int snapshotDeadline,
+    byte[32] snapshotSponsor
+) {
+    // Transactions that register a name may have at most this many inputs
+    // and outputs (the miner-fee sum is an unrolled loop).
+    int constant MAX_INPUTS = 8;
+    int constant MAX_OUTPUTS = 8;
+    // Each input/output value is capped so the 8-term sums can never
+    // overflow a script integer (8 * 1e18 < 2^63). 1e18 sompi = 10 billion KAS,
+    // a third of the total supply.
+    int constant MAX_IO_VALUE = 1000000000000000000;
+    // `now` (unix ms) above this is refused before any arithmetic: year ~33658.
+    int constant MAX_NOW = 1000000000000000;
+    // The latest expiry KachatName's extend and renew accept (~3 million years).
+    int constant MAX_EXPIRES_AT = 100000000000000000;
+    // Snapshot Merkle tree: always this deep (2^20 = 1,048,576 leaves), so
+    // every proof is SNAPSHOT_DEPTH sibling hashes of 32 bytes.
+    int constant SNAPSHOT_DEPTH = 20;
+    int constant SNAPSHOT_PROOF_LEN = 640;
+
+    // Layout of the KachatName runtime state (must match KachatName.sil).
+    struct NameState {
+        byte[32] key;
+        byte[32] name;
+        byte[32] owner;
+        int price;
+        int periodStart;
+        int expiresAt;
+    }
+
+    byte[32] lo = initLo;
+    byte[32] hi = initHi;
+
+    // Unsigned big-endian a < b over 32 bytes. A 5-step binary search finds
+    // the first byte where a and b differ (k = 31 when a == b), then that
+    // byte decides. Invariant before the step of width w: the first
+    // differing index lies in [k, k + 2w); every slice stays inside 0..32.
+    function lessThan(byte[32] a, byte[32] b): bool {
+        int k = 0;
+        if (a.slice(k, k + 16) == b.slice(k, k + 16)) { k = k + 16; }
+        if (a.slice(k, k + 8) == b.slice(k, k + 8)) { k = k + 8; }
+        if (a.slice(k, k + 4) == b.slice(k, k + 4)) { k = k + 4; }
+        if (a.slice(k, k + 2) == b.slice(k, k + 2)) { k = k + 2; }
+        if (a.slice(k, k + 1) == b.slice(k, k + 1)) { k = k + 1; }
+        return unsigned(a[k]) < unsigned(b[k]);
+    }
+
+    // a-z, 0-9, '-'; 1..32 bytes; no hyphen first or last.
+    // CHARSET[c] == 0x01 exactly for the allowed bytes c (256-entry table).
+    function validName(byte[] n) {
+        require(n.length >= 1, "name length >= 1");
+        require(n.length <= 32, "name length <= 32");
+        byte[256] charset = byte[256](0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000001010101010101010101000000000000000000000000000000000000000000000000000000000000000000000000000000010101010101010101010101010101010101010101010101010100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000);
+        for (i, 0, n.length, 32) {
+            require(charset[unsigned(n[i])] == 0x01, "name charset");
+        }
+        require(n[0] != 0x2d, "no leading hyphen");
+        require(n[n.length - 1] != 0x2d, "no trailing hyphen");
+    }
+
+    // What registering a name of `len` bytes for `years` periods costs: the
+    // registration price for the first period, the renewal price for each
+    // further one (so registering for two periods never costs more than
+    // registering for one and extending).
+    function priceFor(int len, int years): int {
+        int first = reg5;
+        int next = renew5;
+        if (len == 1) {
+            first = reg1;
+            next = renew1;
+        } else if (len == 2) {
+            first = reg2;
+            next = renew2;
+        } else if (len == 3) {
+            first = reg3;
+            next = renew3;
+        } else if (len == 4) {
+            first = reg4;
+            next = renew4;
+        }
+        return first + next * (years - 1);
+    }
+
+    // sum(input values) - sum(output values): what the miner receives.
+    function minerFee(): int {
+        require(tx.inputs.length <= MAX_INPUTS, "at most 8 inputs");
+        require(tx.outputs.length <= MAX_OUTPUTS, "at most 8 outputs");
+        int sumIn = 0;
+        for (i, 0, tx.inputs.length, MAX_INPUTS) {
+            int v = tx.inputs[i].value;
+            require(v <= MAX_IO_VALUE, "input value cap");
+            sumIn = sumIn + v;
+        }
+        int sumOut = 0;
+        for (j, 0, tx.outputs.length, MAX_OUTPUTS) {
+            int w = tx.outputs[j].value;
+            require(w <= MAX_IO_VALUE, "output value cap");
+            sumOut = sumOut + w;
+        }
+        return sumIn - sumOut;
+    }
+
+    // Exit position checks shared by merge (seat 0) and absorbed (seat 2).
+    function exitShape() {
+        byte[32] covId = OpInputCovenantId(this.activeInputIndex);
+        require(OpCovInputCount(covId) == 3, "three registry inputs");
+        require(OpCovInputIdx(covId, 0) == 0, "registry input 0");
+        require(OpCovInputIdx(covId, 1) == 1, "registry input 1");
+        require(OpCovInputIdx(covId, 2) == 2, "registry input 2");
+        require(OpCovOutputCount(covId) == 1, "one registry output");
+        require(OpCovOutputIdx(covId, 0) == 0, "registry output 0");
+    }
+
+    // Register `name` for `ownerKey`, prepaying `years` periods (1..maxYears).
+    //   in  0  this gap (lo, hi), lo < blake3(name) < hi
+    //   in  1  the commit UTXO: P2SH(0x20 c 0x75 0x20 ownerKey 0xac),
+    //          c = blake3("kachat-commit:v1" || name || ownerKey || salt),
+    //          spent with a relative sequence lock >= tCommit
+    //   in  2..  funding
+    //   out 0  gap (lo, key)  = gapValue
+    //   out 1  gap (key, hi)  = gapValue
+    //   out 2  name (key, padded name, ownerKey, price 0, periodStart = now,
+    //          expiresAt = now + years * periodMs) = bond
+    //   out 3.. change
+    //   tx.lockTime (timestamp domain) >= now
+    //   inputs - outputs >= reg(len) + renew(len) * (years - 1)
+    entry register(byte[] name, byte[32] ownerKey, byte[32] salt, int now, int years, byte[] namePrefix, byte[] nameSuffix) {
+        require(this.activeInputIndex == 0, "gap at input 0");
+        byte[32] covId = OpInputCovenantId(0);
+        require(OpCovInputCount(covId) == 1, "one registry input");
+        require(OpCovOutputCount(covId) == 3, "three registry outputs");
+        require(OpCovOutputIdx(covId, 0) == 0, "registry output 0");
+        require(OpCovOutputIdx(covId, 1) == 1, "registry output 1");
+        require(OpCovOutputIdx(covId, 2) == 2, "registry output 2");
+        require(OpAuthOutputCount(0) == 3, "gap authorizes outputs 0..2");
+
+        validName(name);
+        int len = name.length;
+        byte[32] newKey = blake3(name);
+        require(lessThan(lo, newKey), "lo < key");
+        require(lessThan(newKey, hi), "key < hi");
+        require(ownerKey != byte[32](0x0000000000000000000000000000000000000000000000000000000000000000), "owner key");
+
+        // The commit at input 1 is exactly the commit for (name, ownerKey, salt).
+        require(tx.inputs.length >= 2, "commit input");
+        byte[32] commitment = blake3(byte[]("kachat-commit:v1") + name + ownerKey + salt);
+        byte[] commitRedeem = byte[](0x20) + commitment + byte[](0x7520) + ownerKey + byte[](0xac);
+        byte[37] commitLock = new ScriptPubKeyP2SHFromRedeemScript(commitRedeem);
+        require(tx.inputs[1].scriptPubKey == byte[](commitLock), "commit script");
+
+        // ...and it is at least tCommit DAA old: input 1 carries a relative
+        // sequence lock of at least tCommit with the disable bit (63) clear,
+        // which consensus (check_sequence_lock, every input) enforces as
+        // blockDaa >= commitDaa + lock. (A DAA CLTV would clash with the
+        // timestamp CLTV below: a transaction has one lock time.)
+        byte[8] seq = OpTxInputSeq(1);
+        require(unsigned(seq[7]) < 128, "commit sequence lock enabled");
+        int relativeLock = int(byte[5](seq.slice(0, 4) + byte[](0x00)));
+        require(relativeLock >= tCommit, "commit matured");
+
+        // Term: now <= tx.lockTime (timestamp domain) < block median time.
+        require(years >= 1, "years >= 1");
+        require(years <= maxYears, "years <= maxYears");
+        require(now <= MAX_NOW, "now range");
+        require(tx.time >= temporal(now));
+        // Registry v5: closed until the snapshot names had their window to be
+        // imported (so `now`, and with it the lock time, is past the deadline).
+        require(now >= snapshotDeadline, "registration opens at the snapshot deadline");
+        int expiry = now + years * periodMs;
+
+        // Outputs.
+        require(tx.outputs[0].value == gapValue, "lower gap value");
+        validateOutputState(0, State { lo: lo, hi: newKey });
+        require(tx.outputs[1].value == gapValue, "upper gap value");
+        validateOutputState(1, State { lo: newKey, hi: hi });
+        require(tx.outputs[2].value == bond, "name bond");
+        byte[32] zeros = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+        byte[32] padded = byte[32](name + zeros.slice(0, 32 - len));
+        validateOutputStateWithTemplate(
+            2,
+            NameState { key: newKey, name: padded, owner: ownerKey, price: 0, periodStart: now, expiresAt: expiry },
+            namePrefix,
+            nameSuffix,
+            nameTemplateHash
+        );
+
+        // The price is left to the miner.
+        require(minerFee() >= priceFor(len, years), "price paid as miner fee");
+    }
+
+    // Import (registry v5): re-create a name of the predecessor registry, as
+    // the snapshot recorded it, in the gap that holds its key.
+    //   in  0  this gap (lo, hi), lo < blake3(name) < hi
+    //   in  1..  funding
+    //   out 0  gap (lo, key)  = gapValue
+    //   out 1  gap (key, hi)  = gapValue
+    //   out 2  name (key, padded name, owner, price 0, periodStart,
+    //          expiresAt) = bond: the snapshot's owner and paid period
+    //   out 3.. change
+    // The snapshot is a Merkle tree of SNAPSHOT_DEPTH levels over the leaves
+    //   blake3("kachat-snapshot-leaf:v1" || key || owner || periodStart as
+    //          byte[8] || expiresAt as byte[8])
+    // in key order from index 0, empty leaves 32 zero bytes, each node
+    // blake3(left || right). `proof` is the sibling at each level, leaf level
+    // first, and bit i of `index` says whether the path is the right child at
+    // level i. No commit and no price: the name is already someone's. The
+    // snapshot owner signs (SIGHASH_ALL), or the sponsor (bySponsor) - so a
+    // name its owner later releases cannot be pushed back onto them by others.
+    // Listings do not carry over (price 0).
+    entry import(byte[] name, byte[32] owner, int periodStart, int expiresAt, int index, byte[] proof, bool bySponsor, sig authSig, byte[] namePrefix, byte[] nameSuffix) {
+        require(this.activeInputIndex == 0, "gap at input 0");
+        byte[32] covId = OpInputCovenantId(0);
+        require(OpCovInputCount(covId) == 1, "one registry input");
+        require(OpCovOutputCount(covId) == 3, "three registry outputs");
+        require(OpCovOutputIdx(covId, 0) == 0, "registry output 0");
+        require(OpCovOutputIdx(covId, 1) == 1, "registry output 1");
+        require(OpCovOutputIdx(covId, 2) == 2, "registry output 2");
+        require(OpAuthOutputCount(0) == 3, "gap authorizes outputs 0..2");
+
+        validName(name);
+        int len = name.length;
+        byte[32] newKey = blake3(name);
+        require(lessThan(lo, newKey), "lo < key");
+        require(lessThan(newKey, hi), "key < hi");
+        byte[32] zeros = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+        require(owner != zeros, "owner key");
+        require(periodStart >= 0, "periodStart range");
+        require(periodStart <= expiresAt, "periodStart <= expiresAt");
+        require(expiresAt <= MAX_EXPIRES_AT, "expiresAt range");
+
+        // Authorized by the snapshot owner, or by the sponsor on their behalf.
+        byte[65] rawSig = byte[65](authSig);
+        require(rawSig[64] == 0x01, "SIGHASH_ALL");
+        byte[32] signer = owner;
+        if (bySponsor) {
+            require(snapshotSponsor != zeros, "no sponsor");
+            signer = snapshotSponsor;
+        }
+        require(checkSig(authSig, pubkey(signer)), "import signature");
+
+        // In the snapshot: the leaf, hashed up the path, is the root.
+        require(index >= 0, "leaf index");
+        require(proof.length == SNAPSHOT_PROOF_LEN, "proof length");
+        byte[32] h = blake3(byte[]("kachat-snapshot-leaf:v1") + newKey + owner + (periodStart as byte[8]) + (expiresAt as byte[8]));
+        int path = index;
+        for (i, 0, SNAPSHOT_DEPTH, SNAPSHOT_DEPTH) {
+            byte[32] sibling = byte[32](proof.slice(i * 32, i * 32 + 32));
+            if (path % 2 == 0) {
+                h = blake3(byte[](h) + sibling);
+            } else {
+                h = blake3(byte[](sibling) + h);
+            }
+            path = path / 2;
+        }
+        require(path == 0, "leaf index < 2^SNAPSHOT_DEPTH");
+        require(h == snapshotRoot, "in the snapshot");
+
+        // Outputs: as register, with the snapshot's owner and paid period.
+        require(tx.outputs[0].value == gapValue, "lower gap value");
+        validateOutputState(0, State { lo: lo, hi: newKey });
+        require(tx.outputs[1].value == gapValue, "upper gap value");
+        validateOutputState(1, State { lo: newKey, hi: hi });
+        require(tx.outputs[2].value == bond, "name bond");
+        byte[32] padded = byte[32](name + zeros.slice(0, 32 - len));
+        validateOutputStateWithTemplate(
+            2,
+            NameState { key: newKey, name: padded, owner: owner, price: 0, periodStart: periodStart, expiresAt: expiresAt },
+            namePrefix,
+            nameSuffix,
+            nameTemplateHash
+        );
+    }
+
+    // Exit, seat 0: this gap (lo, key), the name at key (seat 1, runs
+    // release or reclaim), the successor gap (key, hi) (seat 2, runs
+    // absorbed) become the single gap (lo, hi) at output 0.
+    entry merge() {
+        require(this.activeInputIndex == 0, "seat 0");
+        exitShape();
+        require(OpAuthOutputCount(0) == 1, "merge authorizes output 0");
+
+        // Seat 1 is a name (template checked, P2SH checked) sitting on our hi.
+        NameState seated = readInputStateWithTemplate(1, namePrefixLen, nameSuffixLen, nameTemplateHash);
+        require(seated.key == hi, "name at hi");
+
+        // Seat 2 carries the registry id and is not a name (a name refuses to
+        // run at seat 2), so it is a gap: read it with our own layout.
+        State succ = readInputState(2);
+        require(succ.lo == hi, "successor starts at hi");
+
+        require(tx.outputs[0].value == gapValue, "merged gap value");
+        validateOutputState(0, State { lo: lo, hi: succ.hi });
+    }
+
+    // Exit, seat 2: everything is validated by merge at seat 0.
+    entry absorbed() {
+        require(this.activeInputIndex == 2, "seat 2");
+        exitShape();
+        require(OpAuthOutputCount(2) == 0, "absorbed authorizes nothing");
+    }
+}

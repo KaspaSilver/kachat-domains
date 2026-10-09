@@ -455,3 +455,112 @@ pub fn input_fails(kit: &Kit, spec: &TxSpec, block: Block, idx: usize) -> TxScri
     assert!(kit.validate(&built, block).is_err(), "input {idx} fails but consensus accepted the transaction");
     err
 }
+
+// ---------------------------------------------------------------------------
+// registry v5: import from a migration snapshot
+// ---------------------------------------------------------------------------
+
+/// A snapshot name for the tests: its name, owner and paid period.
+pub struct SnapName {
+    pub name: Vec<u8>,
+    pub owner: Keypair,
+    pub period_start: i64,
+    pub expires_at: i64,
+}
+
+impl SnapName {
+    pub fn new(name: &[u8], owner_seed: u8, period_start: i64, expires_at: i64) -> SnapName {
+        SnapName { name: name.to_vec(), owner: keypair(owner_seed), period_start, expires_at }
+    }
+
+    pub fn entry(&self) -> crate::snapshot::Entry {
+        crate::snapshot::Entry { key: name_key(&self.name), owner: xonly(&self.owner), period_start: self.period_start, expires_at: self.expires_at }
+    }
+
+    pub fn fields(&self) -> NameFields {
+        NameFields::new(&self.name, &xonly(&self.owner), 0, self.period_start, self.expires_at)
+    }
+}
+
+/// The sponsor of the test migrations (`Migration::sponsor`).
+pub fn sponsor() -> Keypair {
+    keypair(90)
+}
+
+/// A v5 kit whose snapshot holds `names`, with the test sponsor and `deadline_ms`.
+pub fn v5_kit(names: &[SnapName], deadline_ms: i64) -> (Kit, crate::snapshot::Snapshot) {
+    let snap = crate::snapshot::Snapshot::new(names.iter().map(SnapName::entry).collect());
+    let kit = Kit::v5(Migration { root: snap.root(), deadline_ms, sponsor: xonly(&sponsor()) });
+    (kit, snap)
+}
+
+/// What an import claims (defaults: the snapshot's own values).
+#[derive(Clone)]
+pub struct ImportArgs {
+    pub name: Vec<u8>,
+    pub owner: [u8; 32],
+    pub period_start: i64,
+    pub expires_at: i64,
+    pub index: i64,
+    pub proof: Vec<u8>,
+    pub by_sponsor: bool,
+    pub signer: Keypair,
+}
+
+impl ImportArgs {
+    /// `n` imported by its owner (`by_sponsor` false) or by the sponsor.
+    pub fn of(snap: &crate::snapshot::Snapshot, n: &SnapName, by_sponsor: bool) -> ImportArgs {
+        let index = snap.index_of(&name_key(&n.name)).expect("in the snapshot");
+        ImportArgs {
+            name: n.name.clone(),
+            owner: xonly(&n.owner),
+            period_start: n.period_start,
+            expires_at: n.expires_at,
+            index: index as i64,
+            proof: snap.proof(index),
+            by_sponsor,
+            signer: if by_sponsor { sponsor() } else { n.owner },
+        }
+    }
+}
+
+/// [gap.import, funding] -> [gap (lo, key), gap (key, hi), name, change], in
+/// the gap (lo, hi). The name output carries `out` (default: the claimed
+/// owner and period, price 0).
+pub fn import_in(kit: &Kit, a: &ImportArgs, lo: &[u8; 32], hi: &[u8; 32], out: Option<NameFields>) -> TxSpec {
+    let key = name_key(&a.name);
+    let gap_in = Input::contract(
+        kit.gap_utxo(lo, hi, 10),
+        &kit.gap,
+        gap_state(lo, hi),
+        "import",
+        vec![
+            bytes(&a.name),
+            bytes(&a.owner),
+            int(a.period_start),
+            int(a.expires_at),
+            int(a.index),
+            bytes(&a.proof),
+            Arg::V(ArtifactValue::Bool(a.by_sponsor)),
+            Arg::Sig(a.signer),
+            bytes(&kit.name.prefix),
+            bytes(&kit.name.suffix),
+        ],
+    );
+    let payer = a.signer;
+    let funding = kit.p2pk_utxo(&payer, kit.params.bond + kit.params.gap_value + kas(1), 12);
+    let fields = out.unwrap_or_else(|| NameFields::new(&a.name, &a.owner, 0, a.period_start, a.expires_at));
+    let mut spec = TxSpec {
+        inputs: vec![gap_in, Input::new(funding, Unlock::P2pk(payer))],
+        outputs: vec![kit.gap_output(lo, &key, 0), kit.gap_output(&key, hi, 0), kit.name_output(&fields, 0)],
+        lock_time: 0,
+    };
+    let change = spec.total_in() - spec.total_out() - NET_FEE;
+    spec.outputs.push(TransactionOutput::new(change, p2pk_spk(&xonly(&payer))));
+    spec
+}
+
+/// Import `a` in the genesis gap.
+pub fn import(kit: &Kit, a: &ImportArgs) -> TxSpec {
+    import_in(kit, a, &ZERO32, &FF32, None)
+}

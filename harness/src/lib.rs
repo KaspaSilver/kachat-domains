@@ -14,6 +14,7 @@
 //! [`check_tx_is_finalized`].
 
 pub mod scenarios;
+pub mod snapshot;
 
 use std::{
     path::{Path, PathBuf},
@@ -313,13 +314,26 @@ impl Kit {
     }
 
     pub fn for_network(params_file: &str) -> Self {
+        Self::build_kit(params_file, None)
+    }
+
+    /// Registry v5 (`contracts/v5/KachatGap.sil`, the v4 name and offer) with
+    /// the migration `m`.
+    pub fn v5(m: Migration) -> Self {
+        Self::build_kit("testnet10", Some(m))
+    }
+
+    fn build_kit(params_file: &str, v5: Option<Migration>) -> Self {
         let root = repo_root();
         let params = NetParams::load_in(&root, params_file);
         let deployer = keypair(200);
 
         // Registry v4: the prices are baked, so the name and gap compile first.
         let name = Arc::new(compile_name_in(&root, &params));
-        let gap = Arc::new(compile_gap_in(&root, &params, &name));
+        let gap = Arc::new(match v5 {
+            Some(m) => compile_gap_v5_in(&root, &params, &name, &m),
+            None => compile_gap_in(&root, &params, &name),
+        });
 
         // Registry genesis: one ordinary UTXO creates the lone genesis gap
         // (00..00, ff..ff), the only output of its covenant group.
@@ -617,6 +631,37 @@ pub fn gap_args(params: &NetParams, name: &Template) -> Vec<ArtifactValue> {
     args.extend(tier_args(&params.register_prices));
     args.extend(tier_args(&params.renew_prices));
     args
+}
+
+/// Registry v5: what a gap carries about the registry it migrates from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Migration {
+    /// the snapshot's Merkle root (`snapshot::Snapshot::root`); zero = none
+    pub root: [u8; 32],
+    /// unix ms: register is refused before it
+    pub deadline_ms: i64,
+    /// x-only key that may import on owners' behalf; zero = owners only
+    pub sponsor: [u8; 32],
+}
+
+impl Migration {
+    /// A registry with no predecessor.
+    pub const NONE: Migration = Migration { root: ZERO32, deadline_ms: 0, sponsor: ZERO32 };
+}
+
+/// KachatGap v5's constructor arguments: v4's, then the migration.
+pub fn gap_args_v5(params: &NetParams, name: &Template, m: &Migration) -> Vec<ArtifactValue> {
+    let mut args = gap_args(params, name);
+    args.push(ArtifactValue::Bytes(m.root.to_vec()));
+    args.push(ArtifactValue::Int(m.deadline_ms));
+    args.push(ArtifactValue::Bytes(m.sponsor.to_vec()));
+    args
+}
+
+/// Compile `contracts/v5/KachatGap.sil` for `name` and the migration `m`.
+pub fn compile_gap_v5_in(root: &Path, params: &NetParams, name: &Template, m: &Migration) -> Template {
+    let src = std::fs::read_to_string(root.join("contracts/v5/KachatGap.sil")).unwrap();
+    compile_source(&src, &gap_args_v5(params, name, m))
 }
 
 /// Compile KachatOffer for `registry_id` with the pinned compiler library

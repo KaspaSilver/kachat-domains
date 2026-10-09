@@ -36,7 +36,12 @@ fn perturb(v: &ArtifactValue) -> ArtifactValue {
 }
 
 fn check(contract: &str, args: &[ArtifactValue]) {
-    let src = std::fs::read_to_string(repo_root().join(format!("contracts/{contract}.sil"))).unwrap();
+    check_file(&format!("contracts/{contract}.sil"), contract, args);
+}
+
+/// `file` (relative to the repo) declares `contract`.
+fn check_file(file: &str, contract: &str, args: &[ArtifactValue]) {
+    let src = std::fs::read_to_string(repo_root().join(file)).unwrap();
     let names = ctor_params(&src, contract);
     assert_eq!(names.len(), args.len(), "{contract}: argument list out of step with the source");
     let base = compile_source(&src, args);
@@ -67,5 +72,8 @@ fn every_constructor_parameter_is_committed() {
         check("KachatName", &name_args(&p));
         check("KachatGap", &gap_args(&p, &name));
         check("KachatOffer", &offer_args(&p, &name, Hash::from_bytes([7; 32])));
+        // registry v5: the migration values (snapshot root, deadline, sponsor) must be committed
+        let m = Migration { root: [3; 32], deadline_ms: 1_800_000_000_000, sponsor: [4; 32] };
+        check_file("contracts/v5/KachatGap.sil", "KachatGap", &gap_args_v5(&p, &name, &m));
     }
 }
