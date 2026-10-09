@@ -306,3 +306,38 @@ fn import_cost() {
     let c = open.costs(&ok(&open, &r.spec, r.block));
     println!("v5 register 7 chars, 1 period: size {} B, compute {} g, min fee {:.5} KAS, budgets {:?}", c.size, c.compute_mass, c.min_fee as f64 / SOMPI_PER_KAS as f64, c.budgets);
 }
+
+// ---------------------------------------------------------------- found by the v5 mutation check
+
+#[test]
+fn a_negative_index_cannot_alias_a_leaf() {
+    // -1 walks the same path as 1 (-1 % 2 = -1: right child; -1 / 2 = 0), so without the
+    // sign check the entry at index 1 could be imported with index -1.
+    let (kit, snap, n) = setup();
+    let s = n.iter().find(|s| snap.index_of(&name_key(&s.name)) == Some(1)).unwrap();
+    let mut a = ImportArgs::of(&snap, s, true);
+    ok(&kit, &import(&kit, &a), active_block());
+    a.index = -1;
+    import_fails(&kit, &import(&kit, &a));
+}
+
+#[test]
+fn the_lower_gap_value_is_checked() {
+    let (kit, snap, n) = setup();
+    let mut spec = import(&kit, &ImportArgs::of(&snap, &n[0], true));
+    spec.outputs[0].value += 1;
+    let last = spec.outputs.len() - 1;
+    spec.outputs[last].value -= 1;
+    import_fails(&kit, &spec);
+}
+
+#[test]
+fn the_gap_must_be_input_0() {
+    let (kit, snap, n) = setup();
+    let mut spec = import(&kit, &ImportArgs::of(&snap, &n[0], true));
+    spec.inputs.swap(0, 1);
+    for o in spec.outputs.iter_mut().take(3) {
+        o.covenant.as_mut().unwrap().authorizing_input = 1;
+    }
+    input_fails(&kit, &spec, active_block(), 1);
+}

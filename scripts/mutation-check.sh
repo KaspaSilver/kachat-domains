@@ -153,4 +153,4 @@ mutate $G5 'require(tx.outputs[0].value == gapValue, "import: lower gap value");
 mutate $G5 'require(tx.outputs[1].value == gapValue, "import: upper gap value");' '' "v5 import: upper gap value"
 mutate $G5 'NameState { key: newKey, name: padded, owner: owner, price: 0, periodStart: periodStart, expiresAt: expiresAt }' 'NameState { key: newKey, name: padded, owner: owner, price: 0, periodStart: periodStart, expiresAt: expiresAt + 1 }' "v5 import: the name keeps the snapshot expiry"
 mutate $G5 'require(OpCovOutputCount(covId) == 3, "import: three registry outputs");' '' "v5 import: output count (redundant with AuthOutputCount(0) == 3 + one registry input, as register)"
-mutate $G5 'require(this.activeInputIndex == 0, "import: gap at input 0");' '' "v5 import: gap at input 0"
+mutate $G5 'require(this.activeInputIndex == 0, "import: gap at input 0");' '' "v5 import: gap at input 0 (redundant: covId is read from input 0 and exactly one registry input is allowed)"
