@@ -6,16 +6,22 @@ The `.kachat` name service on Kaspa covenants:
 - the `kachat-names` CLI that deploys and drives a registry, with a Docker image for Kaspa Quick
   Start.
 
-Design: `KaChat/KACHAT_NAMES.md` in the app repo. Spec of the current registry:
-[docs/REGISTRY_V4.md](docs/REGISTRY_V4.md).
+Design: `KaChat/KACHAT_NAMES.md` in the app repo. Specs: [docs/REGISTRY_V4.md](docs/REGISTRY_V4.md)
+(what mainnet launches) and [docs/REGISTRY_V5.md](docs/REGISTRY_V5.md) (v4 plus the migration
+import). Mainnet launch: [docs/MAINNET.md](docs/MAINNET.md).
 
-**Status (2026-10-08):**
-- **Registry v4 is live on testnet-10.** Registry `e6b7244831004e1db928458bce570347317b50ff124c010d342d73a6c2017f0d`,
-  genesis `5ffdd006…a777`, deployed 2026-10-07. It runs on a **day clock**: mainnet's year
-  scaled to 24 hours.
-- **Mainnet is not deployed.** It still needs an external audit and the owner's go-ahead.
+**Status (2026-10-09):**
+- **Registry v5 is live on testnet-10.** Registry `fdc403f5ef76ea7c71dcb5305d09daf7ab7fd68dc1d274a314fc8ca9111e571d`,
+  genesis `408682e6…dfda5`, deployed 2026-10-09 by migrating every name of the v4 registry
+  `e6b72448…7f0d` (the drill in REGISTRY_V5.md section 6). It runs on a **day clock**: mainnet's
+  year scaled to 24 hours.
+- **The contracts changed after that deployment** (the pre-mainnet audit's C2 fix), so the
+  testnet artifacts in this repo describe the *next* testnet registry. Testnet moves to it with
+  another migration, and until then `verify` fails on testnet-10.
+- **Mainnet is not deployed.** It launches **v4** (`docs/MAINNET.md`), after the external audit
+  and the owner's go-ahead.
 - **Earlier testnet registries** are archived in `manifests/` (see
-  [Registry history](#registry-history)). Their names didn't carry over.
+  [Registry history](#registry-history)). Names carried over only into v5.
 
 ```
 contracts/      KachatGap.sil  KachatName.sil  KachatOffer.sil
@@ -27,7 +33,7 @@ harness/        Rust crate: src/lib.rs (kit), src/scenarios.rs (valid txs), test
 tools/          disasm.py (+ opcode table of rusty-kaspa a41a333)
 tools/kachat-names-cli/   the `kachat-names` CLI (Rust, same rusty-kaspa rev)
 docker/  Dockerfile       the image Kaspa Quick Start builds (docs/KQS.md)
-docs/           REGISTRY_V4.md (spec + owner decisions), REGISTRY_V3.md, KQS.md
+docs/           REGISTRY_V4.md (spec + owner decisions), REGISTRY_V5.md (migration), MAINNET.md, KQS.md, REGISTRY_V3.md
 .secrets/       deployer key + salted commits (gitignored, mode 600)    state/  local registry cache (gitignored)
 ```
 
@@ -282,11 +288,15 @@ built, signed and validated by exactly the code the contract tests use.
 
 **Safety rules built into the tool**
 
-- **Testnet-10 only.**
-  - There is no mainnet mode. The params file, address prefix (`kaspatest:`), consensus params
-    and network name are constants.
-  - Every command that talks to a node first requires it to be on `testnet-10`, synced and
-    UTXO-indexed, and `--submit` re-checks right before sending.
+- **Testnet-10 unless `--network mainnet`.**
+  - The network sets the params file, artifacts, manifest, state, deployer key
+    (`.secrets/<network>-deployer.key`), address prefix (`kaspatest:` / `kaspa:`), consensus
+    params, gRPC port and seeders (`src/net.rs`), once per run.
+  - Every command that talks to a node first requires it to be on the selected network, synced
+    and UTXO-indexed, and `--submit` re-checks right before sending.
+  - **Mainnet `--submit`** also needs an explicit `--node` (no discovered nodes) and a
+    `--max-fee` cap on the network fee. The testnet aids (`--backdate-minutes`, `e2e-plan`) are
+    refused. Runbook: `docs/MAINNET.md`.
 - **Dry run by default.**
   - Every spending command builds the transaction, validates it locally (isolation + header
     finality + UTXO context), checks mempool standardness, and prints a full summary.

@@ -1,10 +1,15 @@
 # Registry v5: migration (2026-10-09)
 
 Status:
-- **Built and tested in-process.** The contract, harness, mutation check and CLI are done, and so
-  is a full drill in the CLI's simulator.
-- **Not deployed.** The next step is the testnet drill (section 6), after a dry run and the
-  owner's "send it".
+- **Live on testnet-10 since 2026-10-09:** registry `fdc403f5…571d`, genesis `408682e6…dfda5`.
+  The drill (section 6) imported all 6 names of the day-clock v4 registry `e6b72448…7f0d`, each with
+  the same owner and dates, and `verify --live` passes.
+- **Mainnet launches v4, not v5** (`docs/MAINNET.md`). v5 is the escape route: the registry a
+  mainnet fix or price change would migrate to.
+- **Changed since the drill:** the pre-mainnet audit's C2 fix (2026-10-09). The fee sum refuses
+  inputs of another covenant. It changes the v5 gap (and the v4 gap and the name) templates, so
+  the live testnet registry runs the code from before the fix. Testnet moves to the fixed code
+  with another migration.
 
 **Why.**
 - A registry can't be upgraded: contracts are immutable, and there is no upgrade key, by design.
@@ -19,7 +24,7 @@ Only the gap. The name and offer contracts are v4's, unchanged.
 | | v4 | v5 |
 |---|---|---|
 | Gap source | `contracts/KachatGap.sil` | `contracts/v5/KachatGap.sil` |
-| Gap size | 4,058 B (testnet) | 7,747 B: the 20-level proof loop and a second inlined name check |
+| Gap size | 4,216 B (mainnet) | 7,896 B (testnet): the 20-level proof loop and a second inlined name check (7,747 B before the C2 fix) |
 | New constructor values | - | `snapshotRoot`, `snapshotDeadline`, `snapshotSponsor` (all read by the code; `tests/ctor_commitment.rs` checks they're committed) |
 | `register` | as before | also refused while `now < snapshotDeadline` |
 | `import` | - | new entry, dispatch tag `aa4cc365` |
@@ -55,7 +60,12 @@ import(byte[] name, byte[32] owner, int periodStart, int expiresAt, int index, b
 - **Signed (SIGHASH_ALL)** by the snapshot owner, or by `snapshotSponsor` when `bySponsor`.
   - **Why signed:** script can say "not before" but never "not after", so the snapshot stays valid
     forever. If import were permissionless, anyone could push a name its owner later *released*
-    back onto them until its old expiry. Requiring the owner or the sponsor prevents that.
+    back onto them until its old expiry. Requiring the owner or the sponsor narrows that to two
+    keys.
+  - **It does not close it (audit C4, 2026-10-09).** After an owner releases an imported name, the
+    sponsor (or the snapshot owner) can import it again, for that owner with its snapshot dates,
+    until its old expiry. An earlier version of this section said nobody could. The app treats a
+    released snapshot name as reserved for its snapshot owner until its snapshot expiry.
   - **The sponsor's power** is only to re-create snapshot names *for their snapshot owners*. It
     can't choose owners, dates or names, and with `snapshotSponsor = 0` only owners import.
 - **Date sanity:** `0 <= periodStart <= expiresAt <= 1e17`.
@@ -143,7 +153,8 @@ optimisation for later, not a blocker.
 
 ## 6. The testnet drill
 
-From the live day-clock v4 registry (`e6b72448…7f0d`) to a v5 testnet registry.
+From the live day-clock v4 registry (`e6b72448…7f0d`) to a v5 testnet registry. **Done
+2026-10-09** (registry `fdc403f5…571d`). The steps stay the runbook for the next migration.
 
 1. **Freeze the snapshot.**
    1. `kachat-names scan`.
@@ -197,6 +208,8 @@ Handoffs only; this repository changes neither.
 - it should serve `/names/all`, so `verify --live --indexer` can prove it.
 
 ## 8. Mainnet emergency runbook (outline)
+
+Mainnet launches v4 (`docs/MAINNET.md`); this is how it would move to v5.
 
 1. **Decide the snapshot time.** Normally "now". If a bug was exploited, the last block before
    the exploit.
