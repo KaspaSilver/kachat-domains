@@ -49,6 +49,20 @@ pub fn verify(paths: &Paths) -> Result<Value> {
     let d = manifest::load(&path, Some(&kit))?;
     ensure!(!d.dry_run, "the manifest is a dry run, not a deployed registry");
 
+    // registry v5: the snapshot the gap bakes is the file the manifest names, unchanged, and
+    // its tree rebuilds to migration.root
+    if !m["snapshot"].is_null() {
+        let f = m["snapshot"]["file"].as_str().ok_or_else(|| anyhow!("manifest snapshot has no file"))?;
+        let bytes = std::fs::read(paths.root.join(f)).map_err(|e| anyhow!("{f}: {e}"))?;
+        ensure!(m["snapshot"]["sha256"] == hex(&Sha256::digest(&bytes)), "{f}: its sha256 is not the manifest's");
+        let snap = crate::snapshot::check_file(&serde_json::from_slice(&bytes)?)?;
+        ensure!(
+            m["params"]["migration"]["root"] == hex(&snap.root()),
+            "{f}: its tree rebuilds to {}, not params.migration.root",
+            hex(&snap.root())
+        );
+    }
+
     let mut sha = Sha256::new();
     sha.update(text.as_bytes());
     Ok(json!({

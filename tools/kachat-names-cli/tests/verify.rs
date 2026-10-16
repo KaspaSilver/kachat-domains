@@ -134,6 +134,62 @@ fn a_dry_run_manifest_is_refused() {
     assert!(refused(&root).contains("dry run"));
 }
 
+/// DOM-030: change one field the indexer reads the registry with (as JSON, so the test
+/// doesn't depend on the file's layout), then require `verify` to refuse, naming it.
+fn refused_with(tag: &str, change: impl FnOnce(&mut serde_json::Value), expect: &str) {
+    let root = copy_repo(tag);
+    let p = root.join(MANIFEST);
+    let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    change(&mut v);
+    std::fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    let e = refused(&root);
+    assert!(e.contains(expect), "{tag}: {e}");
+}
+
+#[test]
+fn every_field_the_indexer_reads_is_checked() {
+    // swapped dispatch tags (the indexer maps every spend to an entry by them)
+    refused_with(
+        "tags-swap",
+        |v| {
+            let t = &mut v["artifacts"]["KachatGap"]["dispatchTags"];
+            let (r, m) = (t["register"].clone(), t["merge"].clone());
+            t["register"] = m;
+            t["merge"] = r;
+        },
+        "KachatGap dispatchTags",
+    );
+    // an offer entry pointing at another entry's tag, and a missing entry
+    refused_with("tags-offer", |v| v["artifacts"]["KachatOffer"]["dispatchTags"]["accept"] = v["artifacts"]["KachatOffer"]["dispatchTags"]["refund"].clone(), "KachatOffer dispatchTags");
+    refused_with("tags-missing", |v| { v["artifacts"]["KachatName"]["dispatchTags"].as_object_mut().unwrap().remove("reclaim"); }, "KachatName dispatchTags");
+    // the state span (the indexer reads every state out of the redeem script with it)
+    refused_with(
+        "span",
+        |v| {
+            let o = v["artifacts"]["KachatName"]["stateSpan"]["offset"].as_u64().unwrap();
+            v["artifacts"]["KachatName"]["stateSpan"]["offset"] = (o + 1).into();
+        },
+        "KachatName stateSpan",
+    );
+    refused_with("lens", |v| v["artifacts"]["KachatGap"]["suffixLen"] = 1.into(), "KachatGap lengths");
+    refused_with("sha", |v| v["artifacts"]["KachatOffer"]["bytecodeSha256"] = "00".repeat(32).into(), "KachatOffer bytecodeSha256");
+    // the genesis gap the indexer seeds the registry from
+    refused_with("gen-index", |v| v["genesis"]["authorizedOutputs"][0]["index"] = 1.into(), "output index");
+    refused_with("gen-hi", |v| v["genesis"]["authorizedOutputs"][0]["state"]["hi"] = "00".repeat(32).into(), "genesis gap state");
+    refused_with("gen-contract", |v| v["genesis"]["authorizedOutputs"][0]["contract"] = "KachatName".into(), "not a KachatGap");
+    refused_with("gen-addr", |v| v["genesis"]["authorizedOutputs"][0]["address"] = "kaspatest:qq".into(), "genesis address");
+    // registry v5 (testnet-10 is one): the snapshot file the gap bakes
+    refused_with("snap-sha", |v| v["snapshot"]["sha256"] = "00".repeat(32).into(), "sha256");
+    refused_with(
+        "gen-two",
+        |v| {
+            let o = v["genesis"]["authorizedOutputs"][0].clone();
+            v["genesis"]["authorizedOutputs"].as_array_mut().unwrap().push(o);
+        },
+        "2 authorized outputs",
+    );
+}
+
 // ---------------------------------------------------------------- live proof
 
 fn kit() -> (Kit, Hash) {

@@ -190,17 +190,44 @@ pub fn load(path: &Path, kit_check: Option<&Kit>) -> Result<Deployed> {
         let out = &g["authorizedOutputs"][0];
         let spk = kit.gap.spk(&gap_state(&ZERO32, &FF32));
         ensure!(out["scriptPublicKey"] == hex(spk.script()), "manifest genesis output is not the genesis gap of these templates");
-        let o = kachat_names_harness::TransactionOutput::new(out["value"].as_u64().unwrap_or(0), spk);
+        let o = kachat_names_harness::TransactionOutput::new(out["value"].as_u64().unwrap_or(0), spk.clone());
         let id = kaspa_consensus_core::hashing::covenant_id::covenant_id(d.genesis_outpoint, [(0u32, &o)].into_iter());
         if id != registry_id {
             bail!("manifest registry id {registry_id} != covenant_id(genesis outpoint, [gap]) = {id}");
         }
+        // DOM-030: the rest of the genesis output, as the indexer seeds the genesis gap from it
+        // (genesis.txid itself can't be recomputed offline: it is bound by the covenant id only
+        // through the funding outpoint above)
+        let outs = g["authorizedOutputs"].as_array().map(Vec::len).unwrap_or(0);
+        ensure!(outs == 1, "manifest genesis has {outs} authorized outputs, not 1");
+        ensure!(out["index"].as_u64() == Some(0), "manifest genesis output index is not 0");
+        ensure!(out["contract"] == "KachatGap", "manifest genesis output is not a KachatGap");
+        ensure!(
+            out["state"] == json!({ "lo": hex(&ZERO32), "hi": hex(&FF32) }) && out["stateScript"] == hex(&gap_state(&ZERO32, &FF32)),
+            "manifest genesis gap state is not (00..00, ff..ff)"
+        );
+        ensure!(out["scriptPublicKeyVersion"].as_u64() == Some(spk.version() as u64), "manifest genesis script version differs");
+        ensure!(out["address"] == spk_address(&spk)?.to_string(), "manifest genesis address is not the genesis gap's");
         for (c, t) in [("KachatGap", &kit.gap), ("KachatName", &kit.name), ("KachatOffer", &kit.offer)] {
-            ensure!(v["artifacts"][c]["templateHash"] == hex(&t.template_hash), "manifest {c} template hash differs");
+            let a = &v["artifacts"][c];
+            ensure!(a["templateHash"] == hex(&t.template_hash), "manifest {c} template hash differs");
             ensure!(
-                v["artifacts"][c]["prefixHex"] == hex(&t.prefix) && v["artifacts"][c]["suffixHex"] == hex(&t.suffix),
+                a["prefixHex"] == hex(&t.prefix) && a["suffixHex"] == hex(&t.suffix),
                 "manifest {c} prefix/suffix differ from the templates"
             );
+            // DOM-030: every field the indexer reads the registry with
+            let compiled = &t.abi.contracts[&t.contract];
+            let tags: serde_json::Map<String, Value> = compiled.entries.keys().map(|e| (e.clone(), json!(t.dispatch_tag(e)))).collect();
+            ensure!(a["dispatchTags"] == Value::Object(tags), "manifest {c} dispatchTags differ from the compiled entries");
+            let span = compiled.compiled.state_span;
+            ensure!(a["stateSpan"] == json!({ "offset": span.offset, "len": span.len }), "manifest {c} stateSpan differs from the template");
+            ensure!(
+                a["prefixLen"].as_u64() == Some(t.prefix.len() as u64)
+                    && a["suffixLen"].as_u64() == Some(t.suffix.len() as u64)
+                    && a["bytecodeLen"].as_u64() == Some(t.bytecode.len() as u64),
+                "manifest {c} lengths differ from the template"
+            );
+            ensure!(a["bytecodeSha256"] == hex(&Sha256::digest(&t.bytecode)), "manifest {c} bytecodeSha256 differs from the template");
         }
         // the gap and name hashes cover the baked tables; the params must say the same
         let tiers = |t: &[u64; 5]| json!({ "len1": t[0], "len2": t[1], "len3": t[2], "len4": t[3], "len5plus": t[4] });
