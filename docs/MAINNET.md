@@ -108,14 +108,35 @@ registrations race for the same UTXO.
 
 | # | Limit | The app |
 |---|---|---|
-| C1 | **A seller can accept an offer on a lapsed name, then reclaim it.** Script can't say "not after", so `accept` works after the name lapsed. The seller takes the offer, then reclaims the name at once. The buyer gets only the 1 KAS bond back. | Don't allow offers on names past `expiresAt`. Give every offer a `refundAfter` before its name's grace ends. Refund or withdraw open offers once their name enters grace. |
+| C1 | **A seller can accept an offer on a lapsed name, then reclaim it.** Script can't say "not after", so an offer stays acceptable until someone spends it: past its `refundAfter`, past the apps' 7-day cap (an app rule, not on chain), and on a lapsed name. The seller takes the offer, then reclaims the name at once. The buyer gets only the 1 KAS bond back. | Don't allow offers on names past `expiresAt`. Give every offer a `refundAfter` before its name's grace ends. Refund or withdraw open offers once their name enters grace. The protection is "`refundAfter`, then someone runs `refund`": the **refund keeper** (section 7) does it for every buyer, app open or not (audit DOM-002). |
 | C3 | Launch-day races reveal names (section 4). | Retry at once. |
-| C4 | A v5 snapshot stays valid forever. After a migration, the sponsor (or the snapshot owner) can re-import a snapshot name its owner released in the new registry, back to that owner, until its old expiry. | Treat released snapshot names as reserved for their snapshot owner until their snapshot expiry. |
+| C4 | A v5 snapshot stays valid forever, and `import` has **no time bound** (audit DOM-003). After a migration, the sponsor (or the snapshot owner) can re-import a snapshot name its owner released, back to that owner, **whenever its key is free**: before its snapshot `expiresAt` it comes back active; until `expiresAt + graceMs` in grace (its owner keeps it and renews at the renewal price); after that lapsed (anyone may reclaim it, but it holds the key until then). An import needs no commit, so it can take the gap the moment someone's registration of that name is pending. Script can't bound it in time (a caller-supplied `now` can always be backdated), so no future version should rely on one. Mainnet v4 has no `import`. | Treat released snapshot names as reserved for their snapshot owner until at least their snapshot `expiresAt + graceMs`. |
 | C5 | Anyone can run `reclaim` and take its bounty (the freed gap value less the fee). | Expected. Say so in the UI. |
-| C6 | An offer is bound to a seller key. If the name leaves the seller and comes back to them, the old offer can be accepted again. | Show only offers made since the current owner got the name. Remind buyers to withdraw. |
+| C6 | An offer is bound to a seller key. If the name leaves the seller and comes back to them, the old offer can be accepted again. | Show only offers made since the current owner got the name. Remind buyers to withdraw. The refund keeper (section 7) refunds it once its `refundAfter` passes. |
 | C7 | The commit is signed with SIGHASH_ALL. | Sign the commit input with SIGHASH_ALL. |
 
 ## 6. If mainnet needs a change
 
 Contracts are immutable and there's no upgrade key. A fix, a price change or any other baked value
 means a new registry that imports a snapshot of this one: `docs/REGISTRY_V5.md` section 8.
+
+## 7. The offer refund keeper (audit DOM-002)
+
+`KachatOffer` can't say "not after", so an offer can be accepted by its seller until someone
+spends it. `refund()` closes that window, and anyone may run it once `refundAfter` has passed:
+it pays the offer back to its buyer, less a network fee the contract caps at `offerMaxFee`
+(0.1 KAS). So the keeper needs no key and no funds.
+
+```bash
+kachat-names --network mainnet --node grpc://<own node>:16110 refund-expired --indexer <mainnet indexer>   # dry run
+kachat-names --network mainnet --node grpc://<own node>:16110 --max-fee 0.1 refund-expired --indexer <mainnet indexer> --submit
+```
+
+- **Candidates** come from the indexer (`/names/all`, then `/names/<name>/offers`), or without
+  `--indexer` from this CLI's own scan (which must reach the tip: run it within the node's
+  pruning window, about a day).
+- **Nothing is trusted from the source:** each offer's state is rebuilt from its fields, and the
+  refund is built only for a UTXO the node holds at the address that state implies.
+- **Schedule:** run it every few hours (KQS, `docs/KQS.md` section 6). It exits non-zero if a refund
+  failed.
+

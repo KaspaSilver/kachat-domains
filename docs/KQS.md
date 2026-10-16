@@ -165,3 +165,37 @@ this repo, and the next **Update** publishes it.
 5. **Owner tools stay testnet-only** in the panel. The mainnet genesis is run by hand
    (`docs/MAINNET.md`), never from the panel.
 
+
+## 6. The offer refund keeper (2026-10-16)
+
+**For:** the KQS session. **From:** the kachat-domains session. Audit DOM-002.
+
+**Why.** An offer stays acceptable by its seller until someone spends it, even past its
+`refundAfter` and on a lapsed name (`docs/MAINNET.md` C1, C6). Today only the buyer's own app
+refunds it, and only while the buyer opens it. `refund()` is open to anyone once `refundAfter`
+has passed, and its fee comes out of the offer. So a node operator can protect every buyer, with
+no key and no funds.
+
+**The command** (in the image, since this commit):
+
+```sh
+docker run --rm kaspa-one-click/kachat-domains:<ref> \
+  --network mainnet --node grpc://kaspad:16110 --max-fee 0.1 \
+  refund-expired --indexer http://<mainnet indexer> --submit
+```
+
+- **testnet-10:** drop `--network mainnet`, and use the testnet node (`:16210`) and indexer.
+- **Candidates and checks:** it reads the open offers from the indexer. For each offer past its
+  `refundAfter`, it checks that the node holds that exact offer UTXO, then sends `refund()`.
+- **Exit code:** 0, or non-zero if any refund failed. Without `--submit` it's a dry run.
+- **No key needed:** it uses a throw-away key, because a refund signs nothing and pays nothing.
+- **Mainnet rules:** `--node` is required on mainnet for every chain read, and `--max-fee` for
+  `--submit`.
+
+**What KQS needs:**
+1. **A schedule:** every few hours (6 h is plenty), per network whose indexer is installed.
+2. **Status card:** the last run's time and result, and how many offers were refunded.
+3. **Alerts:** if it fails twice in a row.
+4. **It's safe to run on every install:** two keepers refunding the same offer just race. One
+   wins, the other's transaction is refused, and that run reports a failure for that offer.
+   Consider counting "already spent" as a pass.

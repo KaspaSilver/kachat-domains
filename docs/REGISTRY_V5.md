@@ -65,9 +65,20 @@ import(byte[] name, byte[32] owner, int periodStart, int expiresAt, int index, b
     back onto them until its old expiry. Requiring the owner or the sponsor narrows that to two
     keys.
   - **It does not close it (audit C4, 2026-10-09).** After an owner releases an imported name, the
-    sponsor (or the snapshot owner) can import it again, for that owner with its snapshot dates,
-    until its old expiry. An earlier version of this section said nobody could. The app treats a
-    released snapshot name as reserved for its snapshot owner until its snapshot expiry.
+    sponsor (or the snapshot owner) can import it again, for that owner with its snapshot dates.
+    An earlier version of this section said nobody could.
+  - **And it has no time bound (audit DOM-003, 2026-10-16).** `import` checks no `tx.time`, so the
+    re-import works whenever the key is free:
+    - before the snapshot `expiresAt`: an active name;
+    - until `expiresAt + graceMs`: a name in grace, which its owner keeps and can `renew` at the
+      renewal price;
+    - after that: a lapsed name anyone may reclaim, but it holds the key until then. An import
+      needs no commit, so it can take a gap the moment a registration of that name is pending.
+    - Script can't bound it either: a caller-supplied `now` can always be backdated (register only
+      proves `lockTime >= now`), the same "not after" limit as offers. A future version must not
+      rely on one.
+    - Apps should treat a released snapshot name as reserved for its snapshot owner until at least
+      its snapshot `expiresAt + graceMs`.
   - **The sponsor's power** is only to re-create snapshot names *for their snapshot owners*. It
     can't choose owners, dates or names, and with `snapshotSponsor = 0` only owners import.
 - **Date sanity:** `0 <= periodStart <= expiresAt <= 1e17`.
@@ -110,6 +121,12 @@ kachat-names snapshot --check <file>    # anyone: rebuild the tree from the entr
   chain (the `verify --live` completeness proof, run against a node first). A stale state would
   silently drop names; this was seen on 2026-10-09, when a timed-out scan left the state behind
   the chain.
+- **Your own node (audit DOM-032).** Nothing a node answers is proven: a hostile node could serve
+  a registry with names invented or dropped, and a snapshot of it is baked into the migration for
+  good. On mainnet every command that reads the chain refuses to run without `--node`. Build the
+  snapshot from your own node, then cross-check the same state against a second, independent
+  node (`verify --live --node <other>`) before the genesis. The file records `provenAgainst`:
+  the node, its sink and virtual DAA, and the counts.
 - The file holds the predecessor registry id, the checkpoint, `atMs`, every entry with its proof,
   and the lapsed names left behind.
 - Anyone can rebuild it from the chain, so a deployer can't add, drop or alter a name unseen.
