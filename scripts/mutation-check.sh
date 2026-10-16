@@ -4,6 +4,10 @@
 # A mutation nobody catches is either redundant (defense in depth, labelled
 # "redundant" below, with what covers it) or a hole in the tests. Restores contracts/ and artifacts/ after
 # each mutation. Usage: scripts/mutation-check.sh [label prefix, e.g. v5]
+#
+# It first runs the unmutated suite on both gaps (the v5 one and, with KACHAT_GAP=v4, mainnet's)
+# and stops if anything fails there: a test that already fails would "kill" every mutation and
+# hide real holes. Every cargo run's output goes to $MUTATION_LOG (default: a file in $TMPDIR).
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -12,6 +16,19 @@ if [[ -n "$(git status --porcelain contracts artifacts)" ]]; then
 fi
 
 ONLY="${1:-}"
+LOG="${MUTATION_LOG:-${TMPDIR:-/tmp}/kachat-mutation-check.log}"
+: > "$LOG"
+echo "log: $LOG"
+
+# baseline: the unmutated contracts must pass every test on both gaps
+./scripts/build.sh >>"$LOG" 2>&1 || { echo "baseline: BUILD FAILED (see $LOG)"; exit 1; }
+for gap_env in KACHAT_GAP=v4 KACHAT_GAP=v5; do
+  if ! (cd harness && env $gap_env cargo test --release --offline --no-fail-fast >>"$LOG" 2>&1); then
+    echo "baseline: the unmutated suite fails with $gap_env (see $LOG); fix that first" >&2
+    exit 1
+  fi
+done
+echo "baseline: the unmutated suite passes on both gaps"
 
 mutate() { # file old new label
   [[ -n "$ONLY" && "$4" != "$ONLY"* ]] && return
@@ -24,9 +41,13 @@ open(f, 'w').write(s.replace(old, new, 1))
 PY
   ./scripts/build.sh >/dev/null 2>&1 || { echo "  $4: BUILD FAILED"; git checkout -q -- contracts artifacts; return; }
   local out killed
-  out="$(cd harness && env ${MUT_ENV:-} cargo test --release --offline --no-fail-fast 2>/dev/null)"
+  echo "=== $4" >>"$LOG"
+  out="$(cd harness && env ${MUT_ENV:-} cargo test --release --offline --no-fail-fast 2>>"$LOG")"
   killed="$(grep -E '^test .* FAILED$' <<<"$out" | sed -E 's/^test (.*) \.\.\. FAILED$/\1/' | tr '\n' ' ')"
-  if [[ -z "$killed" ]]; then echo "SURVIVED  $4"; else echo "killed    $4  <- $killed"; fi
+  if ! grep -q '^test result:' <<<"$out"; then
+    # no suite ran (a compile error, a crash): neither killed nor survived
+    echo "ERROR     $4  (the suite did not run; see $LOG)"
+  elif [[ -z "$killed" ]]; then echo "SURVIVED  $4"; else echo "killed    $4  <- $killed"; fi
   git checkout -q -- contracts artifacts
 }
 
