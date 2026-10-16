@@ -240,6 +240,7 @@ async fn run(cli: Cli, paths: Paths) -> Result<()> {
                 println!("OK  {} names, root {} (rebuilt from the entries; every stored proof matches)", snap.entries.len(), hex(&snap.root()));
                 return Ok(());
             }
+            own_node_on_mainnet(&cli)?;
             let reg = Registry::load(&paths.state())?
                 .ok_or_else(|| anyhow!("{} not found: run `scan` first", paths.rel(&paths.state())))?;
             // A snapshot of a stale state would silently leave names out: prove the state is
@@ -248,10 +249,17 @@ async fn run(cli: Cli, paths: Paths) -> Result<()> {
                 .await
                 .map_err(|e| anyhow!("the scanned state is not the registry on chain ({e}); run `scan` and try again"))?;
             println!("state proven against {}: {} names, {} gaps", proof["node"].as_str().unwrap_or(""), proof["names"], proof["gaps"]);
+            let proven_against = serde_json::json!({
+                "node": proof["node"], "sink": proof["sink"], "virtualDaa": proof["virtualDaa"],
+                "names": proof["names"], "gaps": proof["gaps"],
+            });
             let grace = Templates::load(&paths.root).params.grace_ms;
             let at_ms = at.unwrap_or_else(now_ms);
             let taken = kachat_names_cli::snapshot::take(&reg, at_ms, grace);
-            let v = kachat_names_cli::snapshot::to_json(&taken, &reg, net().name, at_ms, grace);
+            let mut v = kachat_names_cli::snapshot::to_json(&taken, &reg, net().name, at_ms, grace);
+            // which node the state was proven against, at which chain tip: a migration should
+            // cross-check the same snapshot against a second, independent node
+            v["provenAgainst"] = proven_against;
             let dir = paths.root.join("manifests").join("snapshots");
             std::fs::create_dir_all(&dir)?;
             let out = dir.join(format!("{}-{at_ms}.json", &reg.registry_id.to_string()[..16]));
@@ -336,13 +344,31 @@ async fn verify_live(cli: &Cli, paths: &Paths, indexer: Option<&str>) -> Result<
         }
     };
     let p = prove::probe(&claims, &kit)?;
+    own_node_on_mainnet(cli)?;
     let node = Node::connect(cli.node.as_deref(), cli.verbose).await?;
-    node.check_network().await?;
+    let point = node.check_network().await?;
     let held = node.utxos(&p.addresses()).await?;
     let url = node.url.clone();
     node.disconnect().await;
     let r = prove::check(&p, held.into_iter().map(|(a, _, e)| (a, e.covenant_id, e.amount)), &kit, d.registry_id)?;
-    Ok(serde_json::json!({ "ok": true, "source": source, "names": r.names, "gaps": r.gaps, "node": url }))
+    Ok(serde_json::json!({
+        "ok": true, "source": source, "names": r.names, "gaps": r.gaps, "node": url,
+        "sink": point.sink.to_string(), "virtualDaa": point.virtual_daa,
+    }))
+}
+
+/// Mainnet (DOM-032): every command that reads the chain (scan, status, snapshot,
+/// verify --live, ...) or sends needs an explicit `--node`, the operator's own. A node
+/// found through the DNS seeders is a stranger, and nothing in its answers is proven:
+/// it could serve a registry with names invented or dropped, and a snapshot built from
+/// that would bake them into a migration for good.
+fn own_node_on_mainnet(cli: &Cli) -> Result<()> {
+    ensure!(
+        !net().mainnet || cli.node.is_some(),
+        "on mainnet every command that reads the chain needs --node grpc://<your node>:16110 (a node found through the DNS \
+         seeders could serve a fake registry)"
+    );
+    Ok(())
 }
 
 /// The checked items of a snapshot file: `--snapshot`, else params `migration.snapshot`.
@@ -516,6 +542,7 @@ impl Live {
 }
 
 async fn live(cli: Cli, paths: Paths) -> Result<()> {
+    own_node_on_mainnet(&cli)?;
     let deployer = keys::load(&paths)?;
     if cli.submit
         && let Cmd::Genesis { assume_utxo: Some(_) } = &cli.cmd
@@ -523,8 +550,7 @@ async fn live(cli: Cli, paths: Paths) -> Result<()> {
         bail!("--assume-utxo is a dry-run aid; it cannot be submitted");
     }
     if net().mainnet {
-        // no discovered node and no uncapped fee for real money
-        ensure!(!cli.submit || cli.node.is_some(), "mainnet --submit needs an explicit --node (your own node)");
+        // no uncapped fee for real money (the own-node rule is checked above)
         ensure!(!cli.submit || cli.max_fee.is_some(), "mainnet --submit needs --max-fee");
         if let Cmd::Register { backdate_minutes, .. } = &cli.cmd {
             ensure!(*backdate_minutes == 0, "--backdate-minutes is a testnet aid; refused on mainnet");

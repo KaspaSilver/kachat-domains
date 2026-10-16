@@ -87,3 +87,17 @@ fn a_mainnet_registry_runs_end_to_end_in_the_simulator() {
     // a third year is past maxYears
     assert!(sim.run(&Step::Extend("kachat", 1)).is_err());
 }
+
+/// DOM-032: on mainnet a command that reads the chain refuses to pick a node through the
+/// DNS seeders; the offline `verify` still runs without one.
+#[test]
+fn mainnet_chain_reads_need_an_explicit_node() {
+    let bin = env!("CARGO_BIN_EXE_kachat-names");
+    for args in [&["status"][..], &["scan"], &["verify", "--live"], &["snapshot"], &["balance"]] {
+        let out = std::process::Command::new(bin).args(["--network", "mainnet", "--repo"]).arg(repo()).args(args).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success() && err.contains("needs --node"), "{args:?}: {err}");
+    }
+    let out = std::process::Command::new(bin).args(["--network", "mainnet", "--repo"]).arg(repo()).arg("verify").output().unwrap();
+    assert!(out.status.success(), "offline verify: {}", String::from_utf8_lossy(&out.stderr));
+}
