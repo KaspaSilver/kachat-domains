@@ -811,7 +811,7 @@ pub fn buy(env: &Env, wallet: &[Utxo], n: &NameRec, utxo: &Utxo) -> Result<Plan>
 // ---------------------------------------------------------------------------
 
 /// An offer on a registered name, bound to its current owner (since registry v3: only that
-/// owner can accept or decline it; a change of owner ends it).
+/// owner can accept or decline it, while the name is theirs: C6).
 pub fn offer(env: &Env, wallet: &[Utxo], name: &str, amount: u64, refund_after: u64, target: &NameRec) -> Result<Plan> {
     check_name(name)?;
     let p = &env.kit.params;

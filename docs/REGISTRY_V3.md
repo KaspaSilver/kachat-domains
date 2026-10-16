@@ -19,7 +19,7 @@ v3 replaces v2. Testnet gets a new registry and v2's test names are left behind,
 |---|---|---|
 | 1 | **Adjustable prices.** A price record (K shards) that registering, extending and renewing read from the chain, and that the authority key can change **instantly, up or down**. There is **one table** for registering and renewing. | In v2 prices are template constants, so they can never change. The owner's decision, 2026-10-05. |
 | 2 | **`periodMs`** replaces the hard-coded year. Mainnet uses 1 year; testnet runs a **10-minute clock**. | Expiry, grace, renewal and price changes can then be tested in minutes. |
-| 3 | **Offers bound to the seller.** An offer records the owner it was made to. Accepting needs that seller's signature, and the name must still be theirs. | A change of owner ends every earlier offer on chain. It also closes v2's quirk where anyone could match a listing with an offer and keep up to `maxFee`. |
+| 3 | **Offers bound to the seller.** An offer records the owner it was made to. Accepting needs that seller's signature, and the name must still be theirs. | An offer to an earlier owner can't be accepted while the name is someone else's (but if the name comes back to that seller, it can again: C6). It also closes v2's quirk where anyone could match a listing with an offer and keep up to `maxFee`. |
 | 4 | **`decline`.** The seller sends an offer back to the buyer at any time. | Owners can turn offers down. The app returns all open offers when the owner transfers, sells or releases. |
 
 Considered and dropped:

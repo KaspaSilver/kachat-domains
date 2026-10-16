@@ -1,8 +1,9 @@
 # .kachat registry v4 (proposal)
 
-**Status (2026-10-07):** design approved by the owner (decisions in section 7). Contract work
-starts on the `v4` branch. v3 stays live
-on testnet-10 until a v4 genesis replaces it. Nothing is on mainnet.
+**Status (2026-10-16): LIVE on mainnet since 2026-10-09** ("mainnet v1", registry
+`348bd2c8…75a4`, `docs/MAINNET.md`), with the pre-mainnet audit's C2 fix. Testnet-10 runs
+registry v5, v4 plus the migration import (`docs/REGISTRY_V5.md`). The design below was approved
+by the owner on 2026-10-07 (decisions in section 7).
 
 **Why v4, and why now.** A template can never change, so every fix means a new registry. Mainnet
 has no names yet, so a new version now costs no migration. After launch, it would. v4 gathers the

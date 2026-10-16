@@ -10,8 +10,8 @@ Design: `KaChat/KACHAT_NAMES.md` in the app repo. Specs: [docs/REGISTRY_V4.md](d
 (what mainnet launches) and [docs/REGISTRY_V5.md](docs/REGISTRY_V5.md) (v4 plus the migration
 import). Mainnet launch: [docs/MAINNET.md](docs/MAINNET.md).
 
-**Status (2026-10-09):**
-- **Registry v5 is live on testnet-10, on the pre-mainnet-audit code.** Registry
+**Status (2026-10-16):**
+- **Registry v5 is live on testnet-10, on the code after the pre-mainnet audit.** Registry
   `1283f749506c454488a6b7264197658ed1c12051f1887905c4396243a89fbfa2`, genesis `b6223f0f…e24f`,
   deployed 2026-10-09 by migrating every name of the previous v5 registry `fdc403f5…571d` (built
   before the audit's C2 fix and the 0.1 KAS offer fee cap). It runs on a **day clock**: mainnet's
@@ -97,7 +97,7 @@ the name template hash + prefix/suffix lengths, `maxFee`.
 
 | Entry | Who | Checks |
 |---|---|---|
-| `accept(int nameIdx, sig sellerSig)` | the seller | seller signature (SIGHASH_ALL); offer is input `nameIdx + 1`; input `nameIdx` carries the registry id, is a KachatName (template) with `key` and **owner == seller**; it authorizes exactly one output: the name with `owner = buyer`, price 0, same name, periodStart and expiry; output **name continuation + 1** is `P2PK(owner)` with value `>= offer value − maxFee`. A change of owner ends every earlier offer |
+| `accept(int nameIdx, sig sellerSig)` | the seller | seller signature (SIGHASH_ALL); offer is input `nameIdx + 1`; input `nameIdx` carries the registry id, is a KachatName (template) with `key` and **owner == seller**; it authorizes exactly one output: the name with `owner = buyer`, price 0, same name, periodStart and expiry; output **name continuation + 1** is `P2PK(owner)` with value `>= offer value − maxFee`. The name's owner must still be the seller the offer was made to; if the name leaves that seller and comes back, the old offer can be accepted again (C6), so the apps return open offers and the refund keeper (`refund-expired`) refunds them past `refundAfter` |
 | `withdraw(sig)` | buyer | SIGHASH_ALL signature by `buyer` |
 | `decline(sig sellerSig)` | the seller | seller signature; **exactly 1 input and 1 output**, output 0 = `P2PK(buyer)` with value `>= offer value − maxFee` |
 | `refund()` | anyone | `tx.daa >= refundAfter` (DAA CLTV); exactly 1 input and 1 output, output 0 = `P2PK(buyer)` with value `>= offer value − maxFee` |
@@ -140,7 +140,7 @@ All are version-1 transactions with output covenant bindings and per-input compu
 | `renewWindowMs` | 2,592,000,000 (30 days) | 7,200,000 (2 h) | name |
 | register prices, first period, by length 1/2/3/4/5+ | 4000 / 2000 / 1000 / 250 / 35 KAS | 40 / 20 / 10 / 2.5 / 0.35 TKAS | gap |
 | renew prices, each further period | 1000 / 500 / 250 / 62.5 / 8.75 KAS | 10 / 5 / 2.5 / 0.625 / 0.0875 TKAS | gap, name |
-| `offerMaxFee` | 0.02 KAS | 0.02 TKAS | offer |
+| `offerMaxFee` | 0.1 KAS | 0.1 TKAS | offer |
 | loop bounds | 8 inputs, 8 outputs, values ≤ 1e18 sompi (constants) | same | gap, name |
 
 `scripts/build.py` refuses:
@@ -152,20 +152,24 @@ All are version-1 transactions with output covenant bindings and per-input compu
 
 ## Sizes and template hashes
 
+The deployed templates (2026-10-16; mainnet registry v4 `348bd2c8…75a4`, testnet-10 registry v5
+`1283f749…bfa2`, both after the audit's C2 fix):
+
 | Template | Mainnet: size, prefix/state/suffix, hash | Testnet-10: size, prefix/state/suffix, hash |
 |---|---|---|
-| KachatGap | 4067 B, 1/66/4000, `6d1da31f…84b2` | 4058 B, 1/66/3991, `9f057f40…8bf5` |
-| KachatName | 3108 B, 1/126/2981, `13bcd781…e7ed` | 3094 B, 1/126/2967, `c263a8c2…b56b` |
-| KachatOffer | built after the genesis (bakes the registry id) | 1114 B, 1/108/1005, `5a7e22af…2a7a` |
+| KachatGap | 4216 B, 1/66/4149, `d70afe60…1d4f` | 7896 B, 1/66/7829, `9fe90632…4242` (v5: with `import`) |
+| KachatName | 3406 B, 1/126/3279, `259e0250…19d6` | 3392 B, 1/126/3265, `9d4f91bf…e0e8` |
+| KachatOffer | 1117 B, 1/108/1008, `7e7f2461…63e4` | 1117 B, 1/108/1008, `7cb988f2…5100` |
 | commit redeem | 68 B, fixed | same |
 
-Full hashes are in `artifacts/<net>/build-info.json` and the manifest.
+The source of truth is `artifacts/<net>/build-info.json` and `manifests/kachat-names-<net>.json`
+(full hashes; `verify` checks them against the sources). This table is a copy.
 
 Dispatch tags are the same on both networks, and `tests/genesis.rs` pins them:
 
 | Contract | Entries |
 |---|---|
-| gap | `register 8667af5e`, `merge 63d25bc2`, `absorbed dab76355` |
+| gap | `register 8667af5e`, `merge 63d25bc2`, `absorbed dab76355`, and on a v5 gap `import aa4cc365` |
 | name | `transfer 794dca54`, `list 674a8ea4`, `buy 76a02eb9`, `extend 2ce7cceb`, `renew b706ac38`, `release 388ad0b4`, `reclaim f56af4df` |
 | offer | `accept 2e18ed39`, `decline aead5037`, `withdraw 80344ff1`, `refund 777f5b11` |
 
@@ -518,7 +522,7 @@ Pinned by `tests/builders.rs::signature_scripts_are_args_then_tag_then_redeem`.
 | redeem (`prefix ‖ state ‖ suffix`) | `OP_PUSHDATA2` (`0x4d`, 2-byte little-endian length) for all three contracts |
 | `byte[32]` | a 32-byte push (`0x20`) |
 | `sig` | a 65-byte push (`0x41`): 64-byte Schnorr signature + `0x01` |
-| `byte[]` | a minimal push of its bytes. Register's `namePrefix` is a 1-byte push; `nameSuffix` is an `OP_PUSHDATA2` of 2,967 bytes (testnet) / 2,981 (mainnet) |
+| `byte[]` | a minimal push of its bytes. Register's `namePrefix` is a 1-byte push; `nameSuffix` is an `OP_PUSHDATA2` of 3,265 bytes (testnet) / 3,279 (mainnet) |
 | `int` | a minimal script number, not fixed width |
 
 **Ints in detail:**
@@ -560,11 +564,13 @@ genesis. Since v5 the names carry over: the new registry imports a snapshot of t
 
 ## OPEN ISSUES
 
-1. **Not audited.**
+1. **No external audit yet.**
    - silverc v1.0.0 is a month old.
-   - The bytecode was reviewed only through these tests, the mutation check and spot disassembly
-     (`tools/disasm.py`).
-   - An independent review of the `.sil` sources and the bytecode is needed before mainnet.
+   - The bytecode was reviewed through these tests, the mutation check, spot disassembly
+     (`tools/disasm.py`), our own pre-mainnet audit (2026-10-09) and the continuous kachat-audits
+     reviews.
+   - Mainnet launched 2026-10-09 without an external review (the owner's decision); one follows
+     the launch.
 2. **Seat 2 of the exit is trusted by lineage.** `readInputState(2)` has no template check, as in
    dotk.
    - It carries the registry id, and a name refuses every entry at seat 2, so it is a gap.
@@ -595,8 +601,8 @@ genesis. Since v5 the names carry over: the new registry imports a snapshot of t
 9. **Name template size.** The name is ~3.1 kB because `extend` and `renew` each inline the
    miner-fee sum. A single paid entry would save ~1 kB, but it changes the entry interface; not
    done.
-10. **Migration isn't built.** A bug found after mainnet needs a new version that imports a
-    snapshot of this one (design: [docs/REGISTRY_V4.md](docs/REGISTRY_V4.md) section 3). The
-    Merkle import and its script-size check are not prototyped yet.
+10. **Migration means a new registry.** A bug or a baked value found after mainnet needs a new
+    version that imports a snapshot of this one: registry v5 (`docs/REGISTRY_V5.md`), built and
+    drilled twice on testnet-10 (2026-10-09). Its import has no time bound (C4, DOM-003).
 11. **rusty-kaspa pin.** The harness and the CLI stay on `a41a333`, the revision silverscript
     v1.0.0 pins. Moving to 2.1.0 waits for a silverscript release on it.

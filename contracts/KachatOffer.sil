@@ -8,8 +8,9 @@ pragma silverscript ^0.1.0;
 //   key          byte[32]  blake3(name) of the wanted name
 //   buyer        byte[32]  x-only key that receives the name / the refund
 //   seller       byte[32]  the name's owner when the offer was made (registry
-//                          v3): only that owner can accept or decline it, so
-//                          a change of owner ends every earlier offer
+//                          v3): only that owner can accept or decline it, and
+//                          only while the name is theirs (if it comes back to
+//                          them, an old offer can be accepted again: C6)
 //   refundAfter  int       DAA score from which anyone may refund
 //
 // Baked once per network (after the registry genesis):
@@ -61,8 +62,9 @@ contract KachatOffer(
     // owner at least the offer's value minus maxFee.
     // Registry v3: the name's owner must still be the seller the offer was made
     // to, and the seller signs this input too. Nobody else can pair the offer
-    // with a listing any more, and an offer made to an earlier owner can never
-    // be accepted.
+    // with a listing any more, and an offer made to an earlier owner can't be
+    // accepted while the name is someone else's (if it comes back to them, it
+    // can again: C6).
     entry accept(int nameIdx, sig sellerSig) {
         require(sellerSigned(sellerSig), "seller signature");
         require(nameIdx >= 0, "name index");
