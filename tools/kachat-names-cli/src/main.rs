@@ -183,6 +183,14 @@ enum Cmd {
         #[arg(long)]
         offer: Option<String>,
     },
+    /// The offer refund keeper: refund every open offer past its refundAfter to its buyer
+    /// (anyone may; the fee comes out of each offer, so no key or funds are needed). Run it
+    /// on a schedule: an offer stays acceptable on chain until someone spends it
+    RefundExpired {
+        /// take the open offers from this indexer (default: this CLI's own scan, state/)
+        #[arg(long)]
+        indexer: Option<String>,
+    },
     /// Owner exit: release a name (bond and a gap value come back)
     Release { name: String },
     /// Permissionless exit of a lapsed name (after expiresAt + grace)
@@ -586,7 +594,12 @@ impl Live {
 
 async fn live(cli: Cli, paths: Paths) -> Result<()> {
     own_node_on_mainnet(&cli)?;
-    let deployer = keys::load(&paths)?;
+    let deployer = match keys::load(&paths) {
+        Ok(k) => k,
+        // the refund keeper signs nothing and pays nothing: a throw-away key will do
+        Err(_) if matches!(cli.cmd, Cmd::RefundExpired { .. }) => Keypair::new(secp256k1::SECP256K1, &mut secp256k1::rand::rngs::OsRng),
+        Err(e) => return Err(e),
+    };
     if cli.submit
         && let Cmd::Genesis { assume_utxo: Some(_) } = &cli.cmd
     {
@@ -693,6 +706,7 @@ async fn command(l: &Live, cmd: &Cmd) -> Result<()> {
             Ok(())
         }
         Cmd::Status { scan: do_scan } => status(l, *do_scan).await,
+        Cmd::RefundExpired { indexer } => refund_expired(l, indexer.as_deref()).await,
         _ => spend(l, cmd).await,
     }
 }
@@ -1067,6 +1081,83 @@ async fn scan_saving(l: &Live, kit: &Kit, reg: &mut Registry, min_confirmations:
         total.warnings.push(format!("stopped after {} page(s) before the confirmed tip; run `scan` again", total.pages));
     }
     Ok(total)
+}
+
+/// DOM-002: refund every open offer past its refundAfter (see src/keeper.rs).
+async fn refund_expired(l: &Live, indexer: Option<&str>) -> Result<()> {
+    use kachat_names_cli::keeper;
+    let (d, kit, mut reg) = l.registry()?;
+    let candidates: Vec<OfferRec> = match indexer {
+        Some(base) => {
+            let base = base.trim_end_matches('/').to_string();
+            let id = d.registry_id.to_string();
+            tokio::task::spawn_blocking(move || -> Result<Vec<OfferRec>> {
+                let get = |path: &str, cursor: Option<&str>| -> Result<serde_json::Value> {
+                    let mut req = ureq::get(&format!("{base}{path}")).timeout(std::time::Duration::from_secs(30));
+                    if let Some(c) = cursor {
+                        req = req.query("cursor", c);
+                    }
+                    req.call().map_err(|e| anyhow!("{base}{path}: {e}"))?.into_json().map_err(|e| anyhow!("{base}{path}: {e}"))
+                };
+                let status = get("/names/status", None)?;
+                ensure!(status["registryCovenantId"].as_str() == Some(id.as_str()), "the indexer follows registry {}, not {id}", status["registryCovenantId"]);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+                let names = kachat_names_cli::prove::collect_pages(|c| get("/names/all", c), deadline)?;
+                let mut offers = vec![];
+                for n in names {
+                    let page = get(&format!("/names/{}/offers", n.name), None)?;
+                    for o in page["offers"].as_array().into_iter().flatten() {
+                        match keeper::offer_from_indexer(o, &n.name) {
+                            Ok(rec) => offers.push(rec),
+                            Err(e) => println!("skipped an offer the indexer lists on {}: {e}", n.name),
+                        }
+                    }
+                }
+                Ok(offers)
+            })
+            .await??
+        }
+        None => {
+            let rep = scan_saving(l, &kit, &mut reg, 20, l.verbose).await?;
+            ensure!(rep.reached_tip, "the scan did not reach the tip; run `refund-expired` again");
+            reg.offers.clone()
+        }
+    };
+    let due = keeper::due(&candidates, l.point.virtual_daa);
+    println!("{} open offer(s), {} past refundAfter at virtual DAA {}", candidates.len(), due.len(), l.point.virtual_daa);
+    let env = l.env(l.templates.kit(kit.registry_id)?);
+    let (mut refunded, mut failed) = (0, 0);
+    for o in &due {
+        let what = format!("offer {} on {}", fmt_kas(o.value), o.name.clone().unwrap_or_else(|| hex(&o.fields.key[..8])));
+        // the node, not the source, decides: the UTXO must be at the address the offer's state implies
+        let utxo = match l.live_utxos(&[(o.outpoint, kit.offer.spk(&o.fields.encode()))]).await {
+            Ok(u) => u.into_iter().next().unwrap(),
+            Err(e) => {
+                println!("skip {what}: {e}");
+                continue;
+            }
+        };
+        let res = match ops::refund_offer(&env, o, &utxo) {
+            Ok(plan) => l.finish(&plan).await.map(|s| (s, plan)),
+            Err(e) => Err(e),
+        };
+        match res {
+            Ok((Sent::Accepted, plan)) => {
+                refunded += 1;
+                if indexer.is_none() {
+                    l.save_after(&kit, &mut reg, &plan)?;
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                failed += 1;
+                println!("FAILED {what}: {e}");
+            }
+        }
+    }
+    println!("refunded {refunded} of {} due offer(s){}", due.len(), if l.submit { "" } else { " (dry run: add --submit)" });
+    ensure!(failed == 0, "{failed} refund(s) failed");
+    Ok(())
 }
 
 async fn status(l: &Live, do_scan: bool) -> Result<()> {

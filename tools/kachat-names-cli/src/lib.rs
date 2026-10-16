@@ -7,6 +7,7 @@
 //! `--submit`.
 
 pub mod commits;
+pub mod keeper;
 pub mod keys;
 pub mod manifest;
 pub mod net;

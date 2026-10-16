@@ -164,7 +164,7 @@ impl Sim {
         self.wallet.iter().map(|u| u.entry.amount).sum()
     }
 
-    fn env(&self) -> Result<Env> {
+    pub fn env(&self) -> Result<Env> {
         let kit = self.kit.as_ref().ok_or_else(|| anyhow!("no genesis yet"))?;
         // rebuild a kit handle cheaply: Env owns a Kit, so reuse the templates
         Ok(Env {
@@ -176,7 +176,7 @@ impl Sim {
         })
     }
 
-    fn live(&self, op: &TransactionOutpoint) -> Result<Utxo> {
+    pub fn live(&self, op: &TransactionOutpoint) -> Result<Utxo> {
         let e = self.utxos.get(op).ok_or_else(|| anyhow!("simulated UTXO {op} missing"))?;
         Ok(Utxo::new(*op, e.clone()))
     }
