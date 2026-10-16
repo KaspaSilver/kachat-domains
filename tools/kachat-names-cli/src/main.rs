@@ -319,6 +319,8 @@ async fn run(cli: Cli, paths: Paths) -> Result<()> {
 /// exactly the registry on chain (src/prove.rs).
 async fn verify_live(cli: &Cli, paths: &Paths, indexer: Option<&str>) -> Result<serde_json::Value> {
     use kachat_names_cli::prove::{self, Claim};
+    // first, before reading any state or indexer (DOM-038)
+    own_node_on_mainnet(cli)?;
     let d = manifest::load(&paths.manifest(), None)?;
     let kit = Templates::load(&paths.root).kit(d.registry_id)?;
     let (source, claims) = match indexer {
@@ -355,7 +357,6 @@ async fn verify_live(cli: &Cli, paths: &Paths, indexer: Option<&str>) -> Result<
         }
     };
     let p = prove::probe(&claims, &kit)?;
-    own_node_on_mainnet(cli)?;
     let node = Node::connect(cli.node.as_deref(), cli.verbose).await?;
     let point = node.check_network().await?;
     let held = node.utxos(&p.addresses()).await?;
