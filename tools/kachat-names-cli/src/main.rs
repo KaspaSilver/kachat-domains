@@ -107,6 +107,9 @@ enum Cmd {
     },
     /// Salted commit for a name (salt kept in .secrets/commits.json)
     Commit { name: String },
+    /// Spend an unused commit back to the deployer (the name was taken, or a lost race left
+    /// it stranded): its value less the network fee comes back
+    CancelCommit { name: String },
     /// Register a committed name
     Register {
         name: String,
@@ -390,6 +393,17 @@ fn load_snapshot_items(paths: &Paths, file: Option<&std::path::Path>) -> Result<
 // live commands
 // ---------------------------------------------------------------------------
 
+/// What became of a plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sent {
+    /// not broadcast (no --submit)
+    DryRun,
+    /// broadcast, and output 0 is in the UTXO set
+    Accepted,
+    /// broadcast, but not seen accepted within the wait (DOM-031: nothing is recorded)
+    Unconfirmed,
+}
+
 struct Live {
     paths: Paths,
     node: Node,
@@ -477,15 +491,28 @@ impl Live {
             .collect()
     }
 
-    /// Print, and with --submit broadcast. Returns whether it was submitted.
-    async fn finish(&self, plan: &Plan) -> Result<bool> {
+    /// Print, and with --submit broadcast and wait for the acceptance.
+    async fn finish(&self, plan: &Plan) -> Result<Sent> {
         self.finish_then(plan, || Ok(())).await
     }
 
     /// [`Live::finish`], running `after_submit` as soon as the node took the
     /// transaction, before waiting for its acceptance (the genesis writes its
     /// manifest there, so an interrupted wait cannot lose the registry id).
-    async fn finish_then(&self, plan: &Plan, after_submit: impl FnOnce() -> Result<()>) -> Result<bool> {
+    async fn finish_then(&self, plan: &Plan, after_submit: impl FnOnce() -> Result<()>) -> Result<Sent> {
+        self.finish_full(plan, || Ok(()), after_submit, || {}).await
+    }
+
+    /// [`Live::finish_then`], plus `before_submit` (the commit's salt is stored there, so
+    /// it is never lost to an interrupted run, DOM-033) and `undo` if the node refuses
+    /// the transaction.
+    async fn finish_full(
+        &self,
+        plan: &Plan,
+        before_submit: impl FnOnce() -> Result<()>,
+        after_submit: impl FnOnce() -> Result<()>,
+        undo: impl FnOnce(),
+    ) -> Result<Sent> {
         println!("{}", summary::render(plan, self.submit));
         if let Some(cap) = self.max_fee
             && plan.network_fee > cap
@@ -494,37 +521,53 @@ impl Live {
         }
         if !self.submit {
             println!("dry run: nothing was broadcast (add --submit to send it)");
-            return Ok(false);
+            return Ok(Sent::DryRun);
         }
         if !plan.is_valid() {
             bail!("refusing to submit: the transaction does not pass the local checks");
         }
         ensure!(self.point.network == net().name, "node network {}", self.point.network);
         ensure!(!net().mainnet || self.max_fee.is_some(), "mainnet --submit needs --max-fee");
-        let id = self.node.submit(&plan.built.tx).await?;
+        before_submit()?;
+        let id = match self.node.submit(&plan.built.tx).await {
+            Ok(id) => id,
+            Err(e) => {
+                undo();
+                return Err(e);
+            }
+        };
         ensure!(id == plan.txid(), "node returned txid {id}, expected {}", plan.txid());
         println!("SUBMITTED {id} to {}", self.node.url);
         after_submit()?;
-        self.wait_accepted(plan).await;
-        Ok(true)
+        if self.wait_accepted(plan).await {
+            return Ok(Sent::Accepted);
+        }
+        // DOM-031: a transaction the node took but the network never accepted (a lost race,
+        // an eviction) must not be recorded as done.
+        println!(
+            "NOT SEEN ACCEPTED within 60 s: {id} may still land, or may have lost a race. Nothing was recorded (state/, \
+             commits). Run `scan`: it applies the transaction if it was accepted; if not, the inputs (and a register's \
+             commit) are still yours to use again"
+        );
+        Ok(Sent::Unconfirmed)
     }
 
     /// Poll (read-only) until output 0 of the transaction is in the UTXO
     /// index, so the next command sees its outputs. Gives up after 60 s.
-    async fn wait_accepted(&self, plan: &Plan) {
+    async fn wait_accepted(&self, plan: &Plan) -> bool {
         let tx = &plan.built.tx;
-        let Ok(addr) = spk_address(&tx.outputs[0].script_public_key) else { return };
+        let Ok(addr) = spk_address(&tx.outputs[0].script_public_key) else { return false };
         let op = TransactionOutpoint::new(tx.id(), 0);
         for _ in 0..60 {
             if let Ok(found) = self.node.utxos(std::slice::from_ref(&addr)).await
                 && let Some((_, _, e)) = found.iter().find(|(_, o, _)| *o == op)
             {
                 println!("accepted: output 0 is in the UTXO set (DAA {})", e.block_daa_score);
-                return;
+                return true;
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
-        println!("not accepted within 60 s; check `status` / `balance` before the next command");
+        false
     }
 
     fn save_after(&self, kit: &Kit, reg: &mut Registry, plan: &Plan) -> Result<()> {
@@ -671,11 +714,37 @@ async fn spend(l: &Live, cmd: &Cmd) -> Result<()> {
             let mut salt = [0u8; 32];
             secp256k1::rand::RngCore::fill_bytes(&mut secp256k1::rand::rngs::OsRng, &mut salt);
             let plan = ops::commit(&env, &wallet, name, salt)?;
-            if l.finish(&plan).await? {
-                let mut all = commits::load(&l.paths)?;
-                all.push(plan.new_commit.clone().unwrap());
+            // DOM-033: the salt is stored before the commit is broadcast (without it the commit
+            // can never register the name), and removed again only if the node refuses it.
+            let rec = plan.new_commit.clone().unwrap();
+            let paths = &l.paths;
+            let store = || commits::add(paths, &rec);
+            let unstore = || {
+                let _ = commits::remove(paths, &rec);
+            };
+            match l.finish_full(&plan, store, || Ok(()), unstore).await? {
+                Sent::Accepted => {
+                    println!("commit saved to {} (matures {} DAA after acceptance)", paths.rel(&paths.commits()), kit.params.t_commit)
+                }
+                Sent::Unconfirmed => println!("the commit's salt is kept in {}, so it works if it lands", paths.rel(&paths.commits())),
+                Sent::DryRun => {}
+            }
+            return Ok(());
+        }
+        Cmd::CancelCommit { name } => {
+            let mut all = commits::load(&l.paths)?;
+            let c: CommitRec = commits::find_open(&all, name, &me).cloned().ok_or_else(|| anyhow!("no open commit for {name}"))?;
+            let redeem = commit_redeem(&commitment(name.as_bytes(), &me, &c.salt), &me);
+            let lives = l.live_utxos(&[(c.outpoint.unwrap(), pay_to_script_hash_script(&redeem))]).await?;
+            let plan = ops::cancel_commit(&env, &c, &lives[0])?;
+            if l.finish(&plan).await? == Sent::Accepted {
+                for x in all.iter_mut() {
+                    if x.outpoint == c.outpoint {
+                        x.used_by = Some(format!("cancelled by {}", plan.txid()));
+                    }
+                }
                 commits::save(&l.paths, &all)?;
-                println!("commit saved to {} (matures {} DAA after acceptance)", l.paths.rel(&l.paths.commits()), kit.params.t_commit);
+                println!("commit for {name} cancelled; {} back to the deployer", fmt_kas(plan.built.tx.outputs[0].value));
             }
             return Ok(());
         }
@@ -694,7 +763,7 @@ async fn spend(l: &Live, cmd: &Cmd) -> Result<()> {
                 l.live_utxos(&[(gap.outpoint, gap_spk(&kit, &gap)), (c.outpoint.unwrap(), pay_to_script_hash_script(&redeem))]).await?;
             let now = ops::register_now(&env) - backdate_minutes * 60_000;
             let plan = ops::register(&env, &wallet, &gap, &lives[0], &c, &lives[1], *years, now)?;
-            if l.finish(&plan).await? {
+            if l.finish(&plan).await? == Sent::Accepted {
                 l.save_after(&kit, &mut reg, &plan)?;
                 for x in all.iter_mut() {
                     if x.outpoint == c.outpoint {
@@ -714,7 +783,7 @@ async fn spend(l: &Live, cmd: &Cmd) -> Result<()> {
                 .ok_or_else(|| anyhow!("{name} is already in the registry (no gap contains its key)"))?;
             let lives = l.live_utxos(&[(gap.outpoint, gap_spk(&kit, &gap))]).await?;
             let plan = ops::import(&env, &wallet, &gap, &lives[0], item)?;
-            if l.finish(&plan).await? {
+            if l.finish(&plan).await? == Sent::Accepted {
                 l.save_after(&kit, &mut reg, &plan)?;
             }
             return Ok(());
@@ -741,9 +810,13 @@ async fn spend(l: &Live, cmd: &Cmd) -> Result<()> {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 };
                 spent.extend(plan.built.tx.inputs.iter().map(|i| i.previous_outpoint));
-                if !l.finish(&plan).await? {
-                    println!("dry run: stopping after the first import (each import spends the gap the previous one creates)");
-                    return Ok(());
+                match l.finish(&plan).await? {
+                    Sent::Accepted => {}
+                    Sent::DryRun => {
+                        println!("dry run: stopping after the first import (each import spends the gap the previous one creates)");
+                        return Ok(());
+                    }
+                    Sent::Unconfirmed => bail!("import of {} not seen accepted: run `scan`, then `import-all` again", item.name),
                 }
                 l.save_after(&kit, &mut reg, &plan)?;
             }
@@ -833,7 +906,7 @@ async fn spend(l: &Live, cmd: &Cmd) -> Result<()> {
         }
         _ => unreachable!(),
     };
-    if l.finish(&plan).await? {
+    if l.finish(&plan).await? == Sent::Accepted {
         l.save_after(&kit, &mut reg, &plan)?;
     }
     Ok(())
@@ -896,7 +969,7 @@ async fn genesis(l: &Live, assume_utxo: Option<&str>) -> Result<()> {
         println!("state     {}", paths.rel(&paths.state()));
         Ok(())
     };
-    if l.finish_then(&plan, record).await? {
+    if l.finish_then(&plan, record).await? != Sent::DryRun {
         println!(
             "next: ./scripts/build.sh   (builds artifacts/{}/KachatOffer.json for {id}); commit params, artifacts and the manifest",
             net().params_file

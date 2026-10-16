@@ -392,7 +392,7 @@ impl Registry {
             matched.insert(idx, p);
         }
         if let Some(extra) = reg_outs.iter().find(|j| !matched.contains_key(j)) {
-            bail!("{id}: registry output {extra} is not explained by any tracked input; the local state is stale (run `scan`)");
+            bail!("{id}: registry output {extra} is not explained by any tracked input; the local state is stale or wrong (run `scan --from-genesis`)");
         }
 
         // Commit the change.

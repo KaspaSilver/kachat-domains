@@ -59,6 +59,21 @@ pub fn save(paths: &Paths, commits: &[CommitRec]) -> Result<()> {
     write_secret_json(paths, &paths.commits(), &json!({ "commits": commits.iter().map(CommitRec::to_json).collect::<Vec<_>>() }))
 }
 
+/// Store one more commit (before its transaction is broadcast: the salt must never be
+/// lost to an interrupted run).
+pub fn add(paths: &Paths, rec: &CommitRec) -> Result<()> {
+    let mut all = load(paths)?;
+    all.push(rec.clone());
+    save(paths, &all)
+}
+
+/// Drop a stored commit again (its transaction was refused by the node).
+pub fn remove(paths: &Paths, rec: &CommitRec) -> Result<()> {
+    let mut all = load(paths)?;
+    all.retain(|c| c != rec);
+    save(paths, &all)
+}
+
 /// The newest unused, submitted commit for `name` by `owner`.
 pub fn find_open<'a>(commits: &'a [CommitRec], name: &str, owner: &[u8; 32]) -> Option<&'a CommitRec> {
     commits.iter().rev().find(|c| c.name == name && c.owner == *owner && c.outpoint.is_some() && c.used_by.is_none())
