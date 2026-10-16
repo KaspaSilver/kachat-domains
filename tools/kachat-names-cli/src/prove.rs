@@ -28,6 +28,36 @@ use serde_json::Value;
 
 use crate::{net::spk_address, util::hex};
 
+/// At most this many names from one source: more than any registry the key space
+/// proof (and the v5 snapshot tree) is built for.
+pub const MAX_CLAIMS: usize = kachat_names_harness::snapshot::CAPACITY;
+
+/// Follow an indexer's `/names/all` pages (`fetch(cursor)` returns one page) into
+/// claims. Bounded: an error, not a hang, when a page repeats a cursor, when the
+/// names pass [`MAX_CLAIMS`], or when `deadline` passes (a broken or hostile
+/// indexer can't keep `verify --live` busy forever; it can't make the proof pass
+/// either, the node decides that).
+pub fn collect_pages(mut fetch: impl FnMut(Option<&str>) -> Result<Value>, deadline: std::time::Instant) -> Result<Vec<Claim>> {
+    let mut claims = vec![];
+    let mut cursor: Option<String> = None;
+    let mut seen = HashSet::new();
+    loop {
+        ensure!(std::time::Instant::now() < deadline, "/names/all: not done before the deadline ({} names so far)", claims.len());
+        let page = fetch(cursor.as_deref())?;
+        for n in page["names"].as_array().ok_or_else(|| anyhow!("/names/all: no `names` array"))? {
+            claims.push(Claim::from_indexer(n)?);
+            ensure!(claims.len() <= MAX_CLAIMS, "/names/all: more than {MAX_CLAIMS} names");
+        }
+        match page["next"].as_str() {
+            Some(c) => {
+                ensure!(seen.insert(c.to_string()), "/names/all: the cursor {c:?} came back a second time");
+                cursor = Some(c.to_string());
+            }
+            None => return Ok(claims),
+        }
+    }
+}
+
 /// One name as a source claims it.
 #[derive(Clone, Debug)]
 pub struct Claim {

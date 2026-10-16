@@ -307,33 +307,22 @@ async fn verify_live(cli: &Cli, paths: &Paths, indexer: Option<&str>) -> Result<
             let base = base.trim_end_matches('/').to_string();
             let id = d.registry_id.to_string();
             let claims = tokio::task::spawn_blocking(move || -> Result<Vec<Claim>> {
-                let get = |path: &str| -> Result<serde_json::Value> {
-                    ureq::get(&format!("{base}{path}"))
-                        .timeout(std::time::Duration::from_secs(30))
-                        .call()
-                        .map_err(|e| anyhow!("{base}{path}: {e}"))?
-                        .into_json()
-                        .map_err(|e| anyhow!("{base}{path}: {e}"))
+                let get = |path: &str, cursor: Option<&str>| -> Result<serde_json::Value> {
+                    let mut req = ureq::get(&format!("{base}{path}")).timeout(std::time::Duration::from_secs(30));
+                    if let Some(c) = cursor {
+                        req = req.query("cursor", c); // URL-encoded by ureq
+                    }
+                    req.call().map_err(|e| anyhow!("{base}{path}: {e}"))?.into_json().map_err(|e| anyhow!("{base}{path}: {e}"))
                 };
-                let status = get("/names/status")?;
+                let status = get("/names/status", None)?;
                 ensure!(
                     status["registryCovenantId"].as_str() == Some(id.as_str()),
                     "the indexer follows registry {}, not {id}",
                     status["registryCovenantId"]
                 );
-                let mut claims = vec![];
-                let mut cursor: Option<String> = None;
-                loop {
-                    let page = get(&format!("/names/all{}", cursor.as_ref().map(|c| format!("?cursor={c}")).unwrap_or_default()))?;
-                    for n in page["names"].as_array().ok_or_else(|| anyhow!("/names/all: no `names` array"))? {
-                        claims.push(Claim::from_indexer(n)?);
-                    }
-                    match page["next"].as_str() {
-                        Some(c) => cursor = Some(c.to_string()),
-                        None => break,
-                    }
-                }
-                Ok(claims)
+                // the whole listing within 10 minutes (each page within 30 s)
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+                prove::collect_pages(|c| get("/names/all", c), deadline)
             })
             .await??;
             (indexer.unwrap().to_string(), claims)
