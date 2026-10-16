@@ -142,6 +142,15 @@ fn row_label(o: &Value) -> String {
     }
 }
 
+/// An offer too small for this CLI to refund (DOM-040): the refund pays the offer less at
+/// most `offerMaxFee`, and `ops::refund_offer` keeps that output at `MIN_CHANGE` or more,
+/// the same bound `ops::offer` uses to create one. No app makes such an offer, so it was
+/// planted; the keeper reports it as skipped, not as a failure, so it can't keep every
+/// scheduled run red.
+pub fn too_small(o: &OfferRec, offer_max_fee: u64) -> bool {
+    o.value <= offer_max_fee + crate::ops::MIN_CHANGE
+}
+
 /// A node or relay answer that means "this offer was already spent", by another keeper
 /// or by its buyer or seller: a race, not a failure.
 pub fn already_spent(err: &str) -> bool {

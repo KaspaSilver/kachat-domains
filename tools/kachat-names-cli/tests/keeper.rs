@@ -198,3 +198,24 @@ fn a_planted_offer_with_an_invalid_key_is_skipped_not_fatal() {
     assert!(c.skipped[0].0.ends_with(":7"), "{:?}", c.skipped);
     assert!(c.skipped[0].1.contains("zero key"), "{:?}", c.skipped);
 }
+
+#[test]
+fn an_offer_too_small_to_refund_is_skipped_not_a_failure() {
+    // DOM-040: a planted offer with two real keys and 0.15 KAS: the refund would fall under the
+    // CLI's floor, so the keeper skips it (and still refunds the normal offer next to it)
+    let mut sim = with_an_offer();
+    let normal = sim.reg.as_ref().unwrap().offers[0].clone();
+    let max_fee = sim.templates.params.offer_max_fee;
+    let mut tiny = normal.clone();
+    tiny.value = 15_000_000;
+    assert!(keeper::too_small(&tiny, max_fee));
+    assert!(!keeper::too_small(&normal, max_fee));
+    // the bound is the one the builder itself enforces
+    let mut edge = normal.clone();
+    edge.value = max_fee + ops::MIN_CHANGE;
+    assert!(keeper::too_small(&edge, max_fee));
+    sim.run(&Step::Wait(normal.fields.refund_after as u64 + 1 - sim.block.daa, "past refundAfter")).unwrap();
+    let env = sim.env().unwrap();
+    let ok = ops::refund_offer(&env, &normal, &sim.live(&normal.outpoint).unwrap()).unwrap();
+    assert!(ok.is_valid());
+}

@@ -199,8 +199,8 @@ docker run --rm kaspa-one-click/kachat-domains:<ref> \
 4. **It's safe to run on every install:** two keepers refunding the same offer just race. One
    wins, and the other reports "already spent" for that offer, which is not a failure (DOM-036).
    A name whose offers couldn't be read (a 429, a timeout), or an offer row the keeper can't use
-   (anyone can plant one with an invalid buyer key, DOM-039), is reported as SKIPPED. The run
-   still refunds the rest, and exits 0.
+   (anyone can plant one with an invalid buyer key, DOM-039, or one too small to refund, DOM-040),
+   is reported as SKIPPED. The run still refunds the rest, and exits 0.
 5. **Indexer version:** run it against an indexer at kachat-indexer `ee57e58` or later, which
    serves `/offers/refundable`. Every open offer comes in one paged listing, including offers on
    released names (DOM-037). Against an older indexer the keeper falls back to reading offers

@@ -1137,6 +1137,12 @@ async fn refund_expired(l: &Live, indexer: Option<&str>) -> Result<()> {
     let (mut refunded, mut failed) = (0, 0);
     for o in &due {
         let what = format!("offer {} on {}", fmt_kas(o.value), o.name.clone().unwrap_or_else(|| hex(&o.fields.key[..8])));
+        if keeper::too_small(o, kit.params.offer_max_fee) {
+            // DOM-040: below this CLI's refund floor (only a planted offer is this small)
+            println!("SKIPPED {what} at {}: too small to refund (at most maxFee + {})", fmt_outpoint(&o.outpoint), fmt_kas(ops::MIN_CHANGE));
+            skipped += 1;
+            continue;
+        }
         // the node, not the source, decides: the UTXO must be at the address the offer's state implies
         let utxo = match l.live_utxos(&[(o.outpoint, kit.offer.spk(&o.fields.encode()))]).await {
             Ok(u) => u.into_iter().next().unwrap(),
