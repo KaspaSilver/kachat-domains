@@ -112,7 +112,7 @@ registrations race for the same UTXO.
 | C3 | Launch-day races reveal names (section 4). | Retry at once. |
 | C4 | A v5 snapshot stays valid forever, and `import` has **no time bound** (audit DOM-003). After a migration, the sponsor (or the snapshot owner) can re-import a snapshot name its owner released, back to that owner, **whenever its key is free**: before its snapshot `expiresAt` it comes back active; until `expiresAt + graceMs` in grace (its owner keeps it and renews at the renewal price); after that lapsed (anyone may reclaim it, but it holds the key until then). An import needs no commit, so it can take the gap the moment someone's registration of that name is pending. Script can't bound it in time (a caller-supplied `now` can always be backdated), so no future version should rely on one. Mainnet v4 has no `import`. | Treat released snapshot names as reserved for their snapshot owner until at least their snapshot `expiresAt + graceMs`. |
 | C5 | Anyone can run `reclaim` and take its bounty (the freed gap value less the fee). | Expected. Say so in the UI. |
-| C6 | An offer is bound to a seller key. If the name leaves the seller and comes back to them, the old offer can be accepted again. | Show only offers made since the current owner got the name. Remind buyers to withdraw. The refund keeper (section 7) refunds it once its `refundAfter` passes. |
+| C6 | An offer is bound to a seller key. If the name leaves the seller and comes back to them, the old offer can be accepted again. | Show only offers made since the current owner got the name. Remind buyers to withdraw. The refund keeper (section 7) refunds it once its `refundAfter` passes; in `--indexer` mode, until the indexer serves `/offers/refundable`, only offers on names registered now (audit DOM-037). |
 | C7 | The commit is signed with SIGHASH_ALL. | Sign the commit input with SIGHASH_ALL. |
 
 ## 6. If mainnet needs a change
@@ -132,9 +132,14 @@ kachat-names --network mainnet --node grpc://<own node>:16110 refund-expired --i
 kachat-names --network mainnet --node grpc://<own node>:16110 --max-fee 0.1 refund-expired --indexer <mainnet indexer> --submit
 ```
 
-- **Candidates** come from the indexer (`/names/all`, then `/names/<name>/offers`), or without
-  `--indexer` from this CLI's own scan (which must reach the tip: run it within the node's
-  pruning window, about a day).
+- **Candidates** come from the indexer, or without `--indexer` from this CLI's own scan (which
+  must reach the tip: run it within the node's pruning window, about a day).
+  - The indexer's `/offers/refundable` (kachat-indexer `docs/KACHAT_NAMES_OFFERS_REFUNDABLE.md`)
+    lists every open offer past `refundAfter` in one paged call, including offers on released or
+    reclaimed names. The keeper uses it when the indexer has it.
+  - Until then: `/names/all`, then each name's offers. This covers **only names registered now**
+    (DOM-037), and a name whose request fails is skipped and reported, not fatal (DOM-036).
+- **Races:** an offer someone else refunded first is reported as "already spent", not a failure.
 - **Nothing is trusted from the source:** each offer's state is rebuilt from its fields, and the
   refund is built only for a UTXO the node holds at the address that state implies.
 - **Schedule:** run it every few hours (KQS, `docs/KQS.md` section 6). It exits non-zero if a refund

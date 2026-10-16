@@ -197,5 +197,10 @@ docker run --rm kaspa-one-click/kachat-domains:<ref> \
 2. **Status card:** the last run's time and result, and how many offers were refunded.
 3. **Alerts:** if it fails twice in a row.
 4. **It's safe to run on every install:** two keepers refunding the same offer just race. One
-   wins, the other's transaction is refused, and that run reports a failure for that offer.
-   Consider counting "already spent" as a pass.
+   wins, and the other reports "already spent" for that offer, which is not a failure (DOM-036).
+   A name whose offers couldn't be read (a 429, a timeout) is reported as SKIPPED. The run still
+   refunds the rest, and exits 0.
+5. **Indexer coverage:** until the indexer serves `/offers/refundable`
+   (kachat-indexer `docs/KACHAT_NAMES_OFFERS_REFUNDABLE.md`), the keeper reads offers name by
+   name and only sees names registered now (DOM-037). Point it at the KQS indexer (its rate limit
+   is 6000/min), not at a public one.

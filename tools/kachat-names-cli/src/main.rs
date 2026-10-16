@@ -329,11 +329,7 @@ async fn verify_live(cli: &Cli, paths: &Paths, indexer: Option<&str>) -> Result<
             let id = d.registry_id.to_string();
             let claims = tokio::task::spawn_blocking(move || -> Result<Vec<Claim>> {
                 let get = |path: &str, cursor: Option<&str>| -> Result<serde_json::Value> {
-                    let mut req = ureq::get(&format!("{base}{path}")).timeout(std::time::Duration::from_secs(30));
-                    if let Some(c) = cursor {
-                        req = req.query("cursor", c); // URL-encoded by ureq
-                    }
-                    req.call().map_err(|e| anyhow!("{base}{path}: {e}"))?.into_json().map_err(|e| anyhow!("{base}{path}: {e}"))
+                    indexer_get(&base, path, cursor)?.ok_or_else(|| anyhow!("{base}{path}: not found"))
                 };
                 let status = get("/names/status", None)?;
                 ensure!(
@@ -367,6 +363,28 @@ async fn verify_live(cli: &Cli, paths: &Paths, indexer: Option<&str>) -> Result<
         "ok": true, "source": source, "names": r.names, "gaps": r.gaps, "node": url,
         "sink": point.sink.to_string(), "virtualDaa": point.virtual_daa,
     }))
+}
+
+/// One GET to an indexer (blocking): the JSON page, `None` for HTTP 404 (an endpoint this
+/// indexer doesn't have), or an error. Pages of 200 rows. The indexer's offset paging stops
+/// at 10,000 rows (`cursor_too_far`): said plainly rather than as an HTTP 400 (DOM-036).
+fn indexer_get(base: &str, path: &str, cursor: Option<&str>) -> Result<Option<serde_json::Value>> {
+    let mut req = ureq::get(&format!("{base}{path}")).timeout(std::time::Duration::from_secs(30)).query("length", "200");
+    if let Some(c) = cursor {
+        req = req.query("cursor", c); // URL-encoded by ureq
+    }
+    match req.call() {
+        Ok(r) => Ok(Some(r.into_json().map_err(|e| anyhow!("{base}{path}: {e}"))?)),
+        Err(ureq::Error::Status(404, _)) => Ok(None),
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            if body.contains("cursor_too_far") {
+                bail!("{base}{path}: the indexer pages by offset and stops at 10,000 rows; the registry has outgrown it (a keyset-paged indexer is needed)");
+            }
+            bail!("{base}{path}: HTTP {code} {}", body.chars().take(200).collect::<String>())
+        }
+        Err(e) => bail!("{base}{path}: {e}"),
+    }
 }
 
 /// Mainnet (DOM-032): every command that reads the chain (scan, status, snapshot,
@@ -1088,35 +1106,24 @@ async fn scan_saving(l: &Live, kit: &Kit, reg: &mut Registry, min_confirmations:
 async fn refund_expired(l: &Live, indexer: Option<&str>) -> Result<()> {
     use kachat_names_cli::keeper;
     let (d, kit, mut reg) = l.registry()?;
+    let mut skipped = 0;
     let candidates: Vec<OfferRec> = match indexer {
         Some(base) => {
             let base = base.trim_end_matches('/').to_string();
             let id = d.registry_id.to_string();
-            tokio::task::spawn_blocking(move || -> Result<Vec<OfferRec>> {
-                let get = |path: &str, cursor: Option<&str>| -> Result<serde_json::Value> {
-                    let mut req = ureq::get(&format!("{base}{path}")).timeout(std::time::Duration::from_secs(30));
-                    if let Some(c) = cursor {
-                        req = req.query("cursor", c);
-                    }
-                    req.call().map_err(|e| anyhow!("{base}{path}: {e}"))?.into_json().map_err(|e| anyhow!("{base}{path}: {e}"))
-                };
-                let status = get("/names/status", None)?;
+            let c = tokio::task::spawn_blocking(move || -> Result<keeper::Collected> {
+                let status = indexer_get(&base, "/names/status", None)?.ok_or_else(|| anyhow!("{base}/names/status: not found"))?;
                 ensure!(status["registryCovenantId"].as_str() == Some(id.as_str()), "the indexer follows registry {}, not {id}", status["registryCovenantId"]);
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
-                let names = kachat_names_cli::prove::collect_pages(|c| get("/names/all", c), deadline)?;
-                let mut offers = vec![];
-                for n in names {
-                    let page = get(&format!("/names/{}/offers", n.name), None)?;
-                    for o in page["offers"].as_array().into_iter().flatten() {
-                        match keeper::offer_from_indexer(o, &n.name) {
-                            Ok(rec) => offers.push(rec),
-                            Err(e) => println!("skipped an offer the indexer lists on {}: {e}", n.name),
-                        }
-                    }
-                }
-                Ok(offers)
+                keeper::collect_offers(|path, cursor| indexer_get(&base, path, cursor), deadline)
             })
-            .await??
+            .await??;
+            println!("offers from {}", c.source);
+            for (name, why) in &c.skipped {
+                println!("SKIPPED the offers on {name}: {why}");
+            }
+            skipped = c.skipped.len();
+            c.offers
         }
         None => {
             let rep = scan_saving(l, &kit, &mut reg, 20, l.verbose).await?;
@@ -1150,13 +1157,20 @@ async fn refund_expired(l: &Live, indexer: Option<&str>) -> Result<()> {
                 }
             }
             Ok(_) => {}
+            // another keeper (or the buyer, or the seller) spent it first: a race, not a failure
+            Err(e) if keeper::already_spent(&format!("{e:#}")) => println!("already spent {what}: {e}"),
             Err(e) => {
                 failed += 1;
                 println!("FAILED {what}: {e}");
             }
         }
     }
-    println!("refunded {refunded} of {} due offer(s){}", due.len(), if l.submit { "" } else { " (dry run: add --submit)" });
+    println!(
+        "refunded {refunded} of {} due offer(s){}{}",
+        due.len(),
+        if skipped > 0 { format!("; the offers on {skipped} name(s) could not be read") } else { String::new() },
+        if l.submit { "" } else { " (dry run: add --submit)" }
+    );
     ensure!(failed == 0, "{failed} refund(s) failed");
     Ok(())
 }
