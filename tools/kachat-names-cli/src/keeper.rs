@@ -65,7 +65,8 @@ pub fn offer_from_indexer(v: &Value, name: Option<&str>) -> Result<OfferRec> {
 /// The open offers an indexer knows, and what couldn't be read.
 pub struct Collected {
     pub offers: Vec<OfferRec>,
-    /// names whose `/names/<name>/offers` failed (their offers are not in `offers`)
+    /// what couldn't be used, and why: a name whose `/names/<name>/offers` failed, or an
+    /// offer row that doesn't parse (an invalid buyer or seller key, DOM-039)
     pub skipped: Vec<(String, String)>,
     /// `/offers/refundable` (every open offer past refundAfter, in one paged listing) or
     /// `/names/all` + `/names/<name>/offers` (only names registered now: DOM-037)
@@ -80,6 +81,7 @@ pub struct Collected {
 ///   failure (a 429, a timeout) skips that name only; the rest are still refunded.
 pub fn collect_offers(mut fetch: impl FnMut(&str, Option<&str>) -> Result<Option<Value>>, deadline: Instant) -> Result<Collected> {
     let mut offers = vec![];
+    let mut skipped = vec![];
     let mut cursor: Option<String> = None;
     let mut seen = HashSet::new();
     let mut first = true;
@@ -91,20 +93,24 @@ pub fn collect_offers(mut fetch: impl FnMut(&str, Option<&str>) -> Result<Option
         };
         first = false;
         for o in page["offers"].as_array().ok_or_else(|| anyhow!("/offers/refundable: no `offers` array"))? {
-            offers.push(offer_from_indexer(o, None)?);
-            ensure!(offers.len() <= MAX_CLAIMS, "/offers/refundable: more than {MAX_CLAIMS} offers");
+            // DOM-039: anyone can plant an offer the keeper can't use (a zero or off-curve buyer,
+            // about 1 KAS): skip and report it, never let it stop the refunds of everyone else
+            match offer_from_indexer(o, None) {
+                Ok(rec) => offers.push(rec),
+                Err(e) => skipped.push((row_label(o), e.to_string())),
+            }
+            ensure!(offers.len() + skipped.len() <= MAX_CLAIMS, "/offers/refundable: more than {MAX_CLAIMS} offers");
         }
         match page["next"].as_str() {
             Some(c) => {
                 ensure!(seen.insert(c.to_string()), "/offers/refundable: the cursor {c:?} came back a second time");
                 cursor = Some(c.to_string());
             }
-            None => return Ok(Collected { offers, skipped: vec![], source: "/offers/refundable" }),
+            None => return Ok(Collected { offers, skipped, source: "/offers/refundable" }),
         }
     }
     // the indexer has no /offers/refundable: by name
     let names = collect_pages(|c| fetch("/names/all", c)?.ok_or_else(|| anyhow!("/names/all: not found")), deadline)?;
-    let mut skipped = vec![];
     for n in names {
         if Instant::now() >= deadline {
             skipped.push((n.name, "deadline".into()));
@@ -124,6 +130,16 @@ pub fn collect_offers(mut fetch: impl FnMut(&str, Option<&str>) -> Result<Option
         }
     }
     Ok(Collected { offers, skipped, source: "/names/all + /names/<name>/offers (registered names only)" })
+}
+
+/// How a row is named in a skip report: its outpoint, else its name, else the row.
+fn row_label(o: &Value) -> String {
+    let op = &o["outpoint"];
+    match (op["txId"].as_str().or(op["transactionId"].as_str()).or(op.as_str()), op["index"].as_u64()) {
+        (Some(id), Some(i)) => format!("offer {id}:{i}"),
+        (Some(id), None) => format!("offer {id}"),
+        _ => o["name"].as_str().map(|n| format!("an offer on {n}")).unwrap_or_else(|| format!("offer {o}")),
+    }
 }
 
 /// A node or relay answer that means "this offer was already spent", by another keeper

@@ -171,3 +171,30 @@ fn a_spent_offer_is_a_race_not_a_failure() {
         assert!(!keeper::already_spent(e), "{e}");
     }
 }
+
+#[test]
+fn a_planted_offer_with_an_invalid_key_is_skipped_not_fatal() {
+    // DOM-039: anyone can plant an offer row with a zero (or off-curve) buyer; refundAfter 0
+    // puts it first on every run. It must be skipped and reported, and the real offers behind
+    // it still collected.
+    let sim = with_an_offer();
+    let mut planted = row(&sim, "x", 7);
+    planted.as_object_mut().unwrap().remove("name");
+    planted["key"] = faster_hex::hex_string(&name_key(b"bait")).into();
+    planted["buyer"] = kachat_names_cli::net::p2pk_address(&[0u8; 32]).to_string().into();
+    planted["refundAfter"] = 0.into();
+    let pages = [json!({ "offers": [planted, row(&sim, "alpha", 0)], "next": "p2" }), json!({ "offers": [row(&sim, "bravo", 1)] })];
+    let mut n = 0;
+    let c = keeper::collect_offers(
+        |_, _| {
+            n += 1;
+            Ok(Some(pages[n - 1].clone()))
+        },
+        later(),
+    )
+    .unwrap();
+    assert_eq!(c.offers.iter().map(|o| o.outpoint.index).collect::<Vec<_>>(), [0, 1]);
+    assert_eq!(c.skipped.len(), 1);
+    assert!(c.skipped[0].0.ends_with(":7"), "{:?}", c.skipped);
+    assert!(c.skipped[0].1.contains("zero key"), "{:?}", c.skipped);
+}

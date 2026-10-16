@@ -245,7 +245,7 @@ docker run --rm kachat-domains prices
 cd harness && cargo test           # 181 tests (the v5 gap); KACHAT_GAP=v4 cargo test runs them on mainnet's v4 gap
 cargo test --test report -- --nocapture   # the cost table above
 ../scripts/mutation-check.sh       # delete each security check in turn, show which tests catch it
-cd ../tools/kachat-names-cli && cargo test   # the CLI: 65 tests (+3 live, --ignored)
+cd ../tools/kachat-names-cli && cargo test   # the CLI: 66 tests (+3 live, --ignored)
 ```
 
 **Toolchain.** `rust-toolchain.toml` pins Rust 1.97.1, and the Dockerfile uses the same version
@@ -494,7 +494,7 @@ command waits until its output shows up in the UTXO index, so the next one sees 
 
 ```bash
 cd tools/kachat-names-cli
-cargo test                                   # 65 tests: builders 22, verify 15, mainnet 5, keeper 5, rpc_paths 5, live_paging 4, keys 3, migration 3, util 3
+cargo test                                   # 66 tests: builders 22, verify 15, keeper 6, mainnet 5, rpc_paths 5, live_paging 4, keys 3, migration 3, util 3
 cargo test --test live_readonly -- --ignored --nocapture   # read-only, a real testnet-10 node
 ```
 

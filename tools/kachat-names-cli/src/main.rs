@@ -1119,8 +1119,8 @@ async fn refund_expired(l: &Live, indexer: Option<&str>) -> Result<()> {
             })
             .await??;
             println!("offers from {}", c.source);
-            for (name, why) in &c.skipped {
-                println!("SKIPPED the offers on {name}: {why}");
+            for (what, why) in &c.skipped {
+                println!("SKIPPED {what}: {why}");
             }
             skipped = c.skipped.len();
             c.offers
@@ -1168,7 +1168,7 @@ async fn refund_expired(l: &Live, indexer: Option<&str>) -> Result<()> {
     println!(
         "refunded {refunded} of {} due offer(s){}{}",
         due.len(),
-        if skipped > 0 { format!("; the offers on {skipped} name(s) could not be read") } else { String::new() },
+        if skipped > 0 { format!("; {skipped} offer row(s) or name(s) could not be used (SKIPPED above)") } else { String::new() },
         if l.submit { "" } else { " (dry run: add --submit)" }
     );
     ensure!(failed == 0, "{failed} refund(s) failed");
