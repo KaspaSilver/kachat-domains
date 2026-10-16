@@ -200,7 +200,8 @@ docker run --rm kaspa-one-click/kachat-domains:<ref> \
    wins, and the other reports "already spent" for that offer, which is not a failure (DOM-036).
    A name whose offers couldn't be read (a 429, a timeout) is reported as SKIPPED. The run still
    refunds the rest, and exits 0.
-5. **Indexer coverage:** until the indexer serves `/offers/refundable`
-   (kachat-indexer `docs/KACHAT_NAMES_OFFERS_REFUNDABLE.md`), the keeper reads offers name by
-   name and only sees names registered now (DOM-037). Point it at the KQS indexer (its rate limit
-   is 6000/min), not at a public one.
+5. **Indexer version:** run it against an indexer at kachat-indexer `ee57e58` or later, which
+   serves `/offers/refundable`. Every open offer comes in one paged listing, including offers on
+   released names (DOM-037). Against an older indexer the keeper falls back to reading offers
+   name by name, and sees only names registered now. Point it at the KQS indexer (its rate limit
+   is 6000/min), not a public one.
