@@ -242,10 +242,10 @@ docker run --rm kachat-domains prices
 
 ```bash
 ./scripts/build.sh                 # needs ~/silverscript at 3ed9733 (refuses anything else); writes artifacts/
-cd harness && cargo test           # 147 tests
+cd harness && cargo test           # 181 tests (the v5 gap); KACHAT_GAP=v4 cargo test runs them on mainnet's v4 gap
 cargo test --test report -- --nocapture   # the cost table above
 ../scripts/mutation-check.sh       # delete each security check in turn, show which tests catch it
-cd ../tools/kachat-names-cli && cargo test   # the CLI: 46 tests (+3 live, --ignored)
+cd ../tools/kachat-names-cli && cargo test   # the CLI: 62 tests (+3 live, --ignored)
 ```
 
 **Toolchain.** `rust-toolchain.toml` pins Rust 1.97.1, and the Dockerfile uses the same version
@@ -270,23 +270,39 @@ and that the whole transaction is rejected.
 
 | File | Tests | Covers |
 |---|---|---|
-| `register.rs` | 36 | every tier of both tables at exactly the price and one sompi short (the first period at the registration price, the rest at the renewal price); periods 1..2 and 0/−1/3; expiry not matching `now + years·periodMs`; periodStart = now; the commit (missing, another owner / name / salt, a front-runner, immature, short or disabled lock); `now` in the future / DAA-domain lock time / finalized gap input; key outside the gap, on its boundaries, byte order; charset, hyphens, lengths 0 and 33; extra or moved outputs, wrong values, wrong name state, forged name template, zero owner; 9 inputs / 9 outputs |
-| `name.rs` | 47 | transfer, list, buy (signatures, sighash types, payout, tampered continuations, periodStart kept); **extend** (the period cap, any time incl. grace and lapse, renewal-table price per period); **renew** (window boundary, before it, in grace and after lapse, new period from the old expiry, renew + extend combinations, renewal-table price); expiry cap; gifts; batching refused |
-| `exit.rs` | 23 | release (listed, expired, wrong sig, non-adjacent seats, forged seats, extra output, reordered or fourth input); reclaim (bond to the owner, grace is 6 hours on the testnet clock, before grace by script and by consensus, DAA lock, finalized input, payout errors, renewed name) |
+| `register.rs` | 38 | every tier of both tables at exactly the price and one sompi short (the first period at the registration price, the rest at the renewal price); periods 1..2 and 0/−1/3; expiry not matching `now + years·periodMs`; periodStart = now; the commit (missing, another owner / name / salt, a front-runner, immature, short or disabled lock); `now` in the future / DAA-domain lock time / finalized gap input; key outside the gap, on its boundaries, byte order; charset, hyphens, lengths 0 and 33; extra or moved outputs, wrong values, wrong name state, forged name template, zero owner; 9 inputs / 9 outputs |
+| `name.rs` | 48 | transfer, list, buy (signatures, sighash types, payout, tampered continuations, periodStart kept); **extend** (the period cap, any time incl. grace and lapse, renewal-table price per period); **renew** (window boundary, before it, in grace and after lapse, new period from the old expiry, renew + extend combinations, renewal-table price); expiry cap; gifts; batching refused |
+| `exit.rs` | 24 | release (listed, expired, wrong sig, non-adjacent seats, forged seats, extra output, reordered or fourth input); reclaim (bond to the owner, grace is 6 hours on the testnet clock, before grace by script and by consensus, DAA lock, finalized input, payout errors, renewed name) |
 | `offer.rs` | 28 | accept by the seller only (owner changed since the offer, wrong or missing seller signature, matched listings), keeps the paid period; maxFee boundary; payout errors; wrong name; two offers on one name; withdraw; **decline** (seller only, back to the buyer, alone); refund (before / after `refundAfter`, alone, payout errors) |
 | `genesis.rs` | 10 | genesis validity; nobody can mint the registry id later; artifacts == fresh compile; the testnet day clock and the mainnet params; state does not move the template; hand codecs == ABI codecs; state spans; commit spend; dispatch tags |
 | `ctor_commitment.rs` | 1 | changing any constructor parameter changes the template hash (or only the state span for `init*`): silverscript#258 guard |
 | `lifecycle.rs` | 1 | genesis → registrations → list, buy → gift extend → offer + accept → release → renew → reclaim → back to the genesis gap → register anew, every tx spending the previous ones' real outputs |
 | `report.rs` | 1 | the cost table; standardness (P2SH sig-op scan ≤ 15, standard outputs) and mass headroom |
+| `import.rs` | 23 | registry v5: the snapshot tree and proofs, import by owner and sponsor, the claim must be exactly the snapshot entry, tampered proofs and indexes, date bounds, the name unlisted, gaps and values as register, register closed until the deadline, output positions |
+| `mainnet.rs` | 7 | mainnet params on the v4 gap: every tier at its price and one sompi short (`a` for 2 years = 5,000 KAS), renew at 30 days and reclaim at 90 days to the millisecond, the 2-year cap, a lifecycle |
 
-**Mutation check.** `scripts/mutation-check.sh` deletes or weakens 73 individual checks, one at a
-time, rebuilds and reruns the harness. Last run 2026-10-08 on the day-clock contracts:
-**68 killed, 5 survived**. Every survivor is redundant by construction, and each is labelled in
-the script with what covers it:
-- the register output count (covered by `AuthOutputCount(0) == 3` plus one registry input);
-- the explicit 8-input bound (covered by the compiler's loop guard);
+Since the audit's C2 fix, every register and exit test also refuses a funding input of another
+covenant, and the output-position checks have their own attack tests.
+
+**Mutation check.** `scripts/mutation-check.sh` deletes or weakens 151 individual checks, one at a
+time, rebuilds and reruns the harness. The gap's 38 register / merge checks run on both gaps:
+the v4 gap (mainnet's, with `KACHAT_GAP=v4`) and the v5 gap. It first runs the unmutated suite on
+both gaps and stops if anything fails, so a broken baseline can't pass as "killed"; a mutation
+whose suite didn't run is reported as ERROR.
+
+Last run **2026-10-16 at `5f0d124`**, the contracts deployed on mainnet (`348bd2c8…`) and
+testnet-10 (`1283f749…`): **138 killed, 13 survived, 0 errors**. Every survivor is redundant by
+construction, and each is labelled in the script with what covers it:
+- the register output count, on both gaps and in v5 import (covered by `AuthOutputCount(0) == 3`
+  plus one registry input);
+- the explicit 8-input bound, on both gaps (covered by the compiler's loop guard);
+- the zero owner key in register, on both gaps (the commit input must be signed by that key,
+  which no one can for the zero key);
 - each half of the name's one-input / one-output pair (removing both is caught);
-- the offer's wanted-key check (covered by the continuation being validated with the offer's key).
+- the offer's wanted-key check (covered by the continuation being validated with the offer's key);
+- v5 import: no sponsor (checkSig on the zero key fails), zero owner (no leaf has one, and the
+  owner path fails its signature check), the gap at input 0 (covId is read from input 0, and one
+  registry input is allowed).
 
 ## Testnet-10 deployment
 
@@ -478,7 +494,7 @@ command waits until its output shows up in the UTXO index, so the next one sees 
 
 ```bash
 cd tools/kachat-names-cli
-cargo test                                   # 46 tests: builders 22, verify 14, rpc_paths 5, keys 2, util 3
+cargo test                                   # 62 tests: builders 22, verify 15, mainnet 5, rpc_paths 5, live_paging 4, keys 3, migration 3, util 3, keeper 2
 cargo test --test live_readonly -- --ignored --nocapture   # read-only, a real testnet-10 node
 ```
 
