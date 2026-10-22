@@ -1146,8 +1146,16 @@ async fn refund_expired(l: &Live, indexer: Option<&str>) -> Result<()> {
         // the node, not the source, decides: the UTXO must be at the address the offer's state implies
         let utxo = match l.live_utxos(&[(o.outpoint, kit.offer.spk(&o.fields.encode()))]).await {
             Ok(u) => u.into_iter().next().unwrap(),
+            // gone from the UTXO set: refunded, withdrawn or accepted by someone else first
+            Err(e) if keeper::already_spent(&format!("{e:#}")) => {
+                println!("already spent {what}: {e}");
+                continue;
+            }
+            // the node couldn't be asked (an RPC error, a node restarting): a failure, not a
+            // skip, so a run that refunds nothing never exits 0 (KQS-035)
             Err(e) => {
-                println!("skip {what}: {e}");
+                failed += 1;
+                println!("FAILED {what}: could not read its coins from the node: {e:#}");
                 continue;
             }
         };

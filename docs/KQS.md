@@ -187,7 +187,7 @@ docker run --rm kaspa-one-click/kachat-domains:<ref> \
 - **testnet-10:** drop `--network mainnet`, and use the testnet node (`:16210`) and indexer.
 - **Candidates and checks:** it reads the open offers from the indexer. For each offer past its
   `refundAfter`, it checks that the node holds that exact offer UTXO, then sends `refund()`.
-- **Exit code:** 0, or non-zero if any refund failed. Without `--submit` it's a dry run.
+- **Exit code:** 0, or non-zero if any refund failed or a due offer's coins couldn't be read from the node (a `FAILED` line, KQS-035). An offer someone else spent first is `already spent`, not a failure. Without `--submit` it's a dry run.
 - **No key needed:** it uses a throw-away key, because a refund signs nothing and pays nothing.
 - **Mainnet rules:** `--node` is required on mainnet for every chain read, and `--max-fee` for
   `--submit`.

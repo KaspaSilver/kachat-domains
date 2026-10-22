@@ -167,7 +167,8 @@ fn a_spent_offer_is_a_race_not_a_failure() {
     for e in ["transaction 12ab is a double spend", "outpoint 12ab:0 is not in the UTXO set (spent by someone else)", "rejected: already spent"] {
         assert!(keeper::already_spent(e), "{e}");
     }
-    for e in ["HTTP 500 internal", "fee too low", "timed out"] {
+    // KQS-035: the node couldn't be read: a failure the run's exit status must show
+    for e in ["HTTP 500 internal", "fee too low", "timed out", "GetUtxosByAddresses: RPC request timeout", "connecting to grpc://n:16110: refused"] {
         assert!(!keeper::already_spent(e), "{e}");
     }
 }
